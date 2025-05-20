@@ -1,0 +1,39 @@
+{
+  "name": "webfl",
+  "version": "1.0.0",
+  "main": "build/server/app.js",
+  "types": "build/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"tsc --watch\" \"nodemon build/server/app.js\"",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc"
+  },
+  "author": "",
+  "license": "ISC",
+  "keywords": [],
+  "description": "",
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.8",
+    "@types/cors": "^2.8.18",
+    "@types/jsonwebtoken": "^9.0.9",
+    "@types/uuid4": "^2.0.3",
+    "@types/ws": "^8.18.1",
+    "concurrently": "^9.1.2",
+    "nodemon": "^3.1.9",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@types/express": "^5.0.1",
+    "cookie": "^1.0.2",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "redis": "^5.0.0",
+    "uuid4": "^2.0.3",
+    "ws": "^8.18.1"
+  }
+}
