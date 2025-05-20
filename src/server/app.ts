@@ -13,14 +13,20 @@ import { getUsernames } from "./apis/get_usernames.js";
 import { pressedCircle } from "./apis/pressed_circle.js";
 import { startGame } from "./apis/start_game.js";
 import { registerUser } from "./apis/login.js";
+import path from "path";
+import { fileURLToPath } from "url";
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const app = express();
 app.use(cookieParser());
 attachWSServer();
 await client.connect();
-app.use(cors({ origin: "http://localhost:5500", credentials: true }));
+app.use(cors({ origin: process.env.CLIENT_ORIGIN, credentials: true }));
 app.use(express.json());
 server.on("request", app);
+
+app.use(express.static(path.join(__dirname, "../../public")));
 
 // POST operations
 app.post("/login", registerUser);
@@ -28,6 +34,15 @@ app.post("/pressedCircle", pressedCircle);
 app.post("/startGame", startGame);
 
 // GET operations
+app.get("/", (_, res: Response) => {
+  res.sendFile(path.join(__dirname, "../../public/index.html"));
+});
+app.get("/game", (_, res) => {
+  res.sendFile(path.join(__dirname, "../../public/game.html"));
+});
+app.get("/endscreen", (_, res) => {
+  res.sendFile(path.join(__dirname, "../../../public/endscreen.html"));
+});
 app.get("/getusernames", getUsernames);
 app.get("/getGameState", async (_: Request, res: Response) => {
   const dbData = (await client.get("gameStatus")) as string;
@@ -49,7 +64,7 @@ ws.on("connection", async (wss, req) => {
 
   if (isGameConnection) {
     const usernames = (await client.json.get("usernames:usernames")) as string;
-    const parsedUsernames = JSON.parse(usernames)['usernames'];
+    const parsedUsernames = JSON.parse(usernames)["usernames"];
     helperFunction({ type: "updatedNames", props: parsedUsernames });
   }
 
