@@ -16,7 +16,7 @@ export async function handleGameStart() {
 }
 
 export async function handleButtonClick() {
-  const startGameData = await httpFunction("http://localhost:3000/startGame", {
+  const startGameData = await httpFunction("https://whoisfaster.onrender.com/startGame", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

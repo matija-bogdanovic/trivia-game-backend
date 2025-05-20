@@ -21,7 +21,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         try {
           const response = await httpFunction(
-            "http://localhost:3000/pressedCircle",
+            "https://whoisfaster.onrender.com/pressedCircle",
             {
               method: "POST",
               headers: {
@@ -44,10 +44,10 @@ document.addEventListener("DOMContentLoaded", () => {
   classes.wss.onopen = async () => {
     try {
       const startStatus = await httpFunction(
-        "http://localhost:3000/getGameState"
+        "https://whoisfaster.onrender.com/getGameState"
       );
       const numberOfPlayers = await httpFunction(
-        "http://localhost:3000/playerNum"
+        "https://whoisfaster.onrender.com/playerNum"
       );
       if (numberOfPlayers.usernames.length < 2) {
         classes.button.disabled = true;

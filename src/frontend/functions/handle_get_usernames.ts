@@ -2,7 +2,9 @@ import { httpFunction } from "../helpers/http_function.js";
 import { classes } from "../helpers/variables.js";
 
 export async function handleGetUsername() {
-  const data = await httpFunction("http://localhost:3000/getusernames");
+  const data = await httpFunction(
+    "https://whoisfaster.onrender.com/getusernames"
+  );
 
   classes.heart.src = "/pics/heart.svg";
   classes.heart.width = 20;
@@ -38,7 +40,9 @@ export async function handleGetUsername() {
     }
   }
 
-  const gameData = await httpFunction("http://localhost:3000/getGameState")
+  const gameData = await httpFunction(
+    "https://whoisfaster.onrender.com/getGameState"
+  );
   localStorage.setItem("gameStatus", `${gameData.gameState}`);
 
   if (localStorage.getItem("gameStatus") === "true") {
@@ -47,7 +51,7 @@ export async function handleGetUsername() {
 
   if (classes.circle.style.backgroundColor === "#00FF00") {
     classes.circle.addEventListener("click", async () => {
-      await httpFunction("http://localhost:3000/pressedCircle", {
+      await httpFunction("https://whoisfaster.onrender.com/pressedCircle", {
         method: "POST",
         body: JSON.stringify({ pressedBy: document.cookie }),
         headers: {

@@ -2,7 +2,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const winner = document.getElementById("winner");
   const playagain = document.getElementById("playagain");
 
-  const wss = new WebSocket("http://localhost:3000/endscreen");
+  const wss = new WebSocket("https://whoisfaster.onrender.com/endscreen");
 
   wss.onopen = () => {
     wss.send(JSON.stringify({ getWinner: "getWinner" }));

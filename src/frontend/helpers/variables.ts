@@ -1,6 +1,6 @@
 export const classes = {
   // Websocket connection
-  wss: new WebSocket("ws://localhost:3000/game"),
+  wss: new WebSocket("ws://whoisfaster.onrender.com/game"),
   // Localstorage username
   localStorageUsername: localStorage.getItem("username"),
   // Grab client id

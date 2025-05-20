@@ -9,7 +9,7 @@ document.addEventListener("DOMContentLoaded", function (_) {
   // Get the button element and type it as HTMLButtonElement
   const button = document.getElementById("button") as HTMLButtonElement | null;
   // Create a WebSocket connection
-  const socket = new WebSocket("ws://localhost:3000");
+  const socket = new WebSocket("ws://whoisfaster.onrender.com");
   // Set the onmessage handler with proper typing
   socket.onmessage = (event: MessageEvent) => {
     const data = JSON.parse(event.data);
