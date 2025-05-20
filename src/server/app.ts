@@ -41,7 +41,7 @@ app.get("/game", (_, res) => {
   res.sendFile(path.join(__dirname, "../../public/game.html"));
 });
 app.get("/endscreen", (_, res) => {
-  res.sendFile(path.join(__dirname, "../../../public/endscreen.html"));
+  res.sendFile(path.join(__dirname, "../../public/endscreen.html"));
 });
 app.get("/getusernames", getUsernames);
 app.get("/getGameState", async (_: Request, res: Response) => {

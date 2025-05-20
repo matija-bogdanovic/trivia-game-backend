@@ -30,7 +30,7 @@ export async function registerUser(req, res, next) {
             });
             res.cookie("token", token, {
                 httpOnly: true,
-                secure: false,
+                secure: true,
                 sameSite: "lax",
                 maxAge: 172800000,
             });
