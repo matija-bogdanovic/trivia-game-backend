@@ -1,8 +1,8 @@
 document.addEventListener("DOMContentLoaded", () => {
   const winner = document.getElementById("winner");
   const playagain = document.getElementById("playagain");
-
-  const wss = new WebSocket("https://whoisfaster.onrender.com/endscreen");
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const wss = new WebSocket(`${protocol}://${window.location.host}/endscreen`);
 
   wss.onopen = () => {
     wss.send(JSON.stringify({ getWinner: "getWinner" }));

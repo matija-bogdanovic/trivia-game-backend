@@ -1,6 +1,10 @@
+const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+const gameSocket = new WebSocket(`${protocol}://${window.location.host}/game`);
+
 export const classes = {
   // Websocket connection
-  wss: new WebSocket("ws://whoisfaster.onrender.com/game"),
+  protocol,
+  wss: gameSocket,
   // Localstorage username
   localStorageUsername: localStorage.getItem("username"),
   // Grab client id

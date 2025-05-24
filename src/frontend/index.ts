@@ -9,7 +9,9 @@ document.addEventListener("DOMContentLoaded", function (_) {
   // Get the button element and type it as HTMLButtonElement
   const button = document.getElementById("button") as HTMLButtonElement | null;
   // Create a WebSocket connection
-  const socket = new WebSocket("ws://whoisfaster.onrender.com");
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const socket = new WebSocket(`${protocol}://${window.location.host}/`);
+
   // Set the onmessage handler with proper typing
   socket.onmessage = (event: MessageEvent) => {
     const data = JSON.parse(event.data);
@@ -32,6 +34,6 @@ document.addEventListener("DOMContentLoaded", function (_) {
     console.log("kurac");
   };
   button.addEventListener("click", async () => {
-    handleJoinGame()
+    handleJoinGame();
   });
 });
