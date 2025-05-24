@@ -1,3 +1,4 @@
+import { port } from "../../ports.js";
 import { httpFunction } from "../helpers/http_function.js";
 
 export async function handleJoinGame() {
@@ -13,7 +14,7 @@ export async function handleJoinGame() {
     userCountEl.innerText = "Username mustn't be shorter than 3 letters";
     return;
   }
-  await httpFunction("https://whoisfaster.onrender.com/login", {
+  await httpFunction(`${port}/login`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

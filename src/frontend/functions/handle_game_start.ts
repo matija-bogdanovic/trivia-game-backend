@@ -1,3 +1,4 @@
+import { port } from "../../ports.js";
 import { httpFunction } from "../helpers/http_function.js";
 import { classes } from "../helpers/variables.js";
 
@@ -16,7 +17,7 @@ export async function handleGameStart() {
 }
 
 export async function handleButtonClick() {
-  const startGameData = await httpFunction("https://whoisfaster.onrender.com/startGame", {
+  const startGameData = await httpFunction(`${port}/startGame`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

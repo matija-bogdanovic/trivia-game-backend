@@ -21,7 +21,6 @@ export async function pressedCircle(req: Request, res: Response) {
       return user;
     })
   );
-
   await client.json.set("usernames:usernames", "$.usernames", updatedUsers);
   helperFunction({ props: updatedUsers, type: "updatedNames" });
 

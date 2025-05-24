@@ -1,3 +1,4 @@
+import { port } from "../ports.js";
 import {
   handleButtonClick,
   handleGameStart,
@@ -20,16 +21,13 @@ document.addEventListener("DOMContentLoaded", () => {
         classes.circle.style.backgroundColor = "gray";
 
         try {
-          const response = await httpFunction(
-            "https://whoisfaster.onrender.com/pressedCircle",
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({ round: roundName }),
-            }
-          );
+          await httpFunction(`${port}/pressedCircle`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ round: roundName }),
+          });
 
           classes.wss.send(JSON.stringify({ roundEnded: true }));
         } catch (err) {
@@ -42,13 +40,10 @@ document.addEventListener("DOMContentLoaded", () => {
   };
 
   classes.wss.onopen = async () => {
+    classes.wss.send(JSON.stringify({ joined: true }));
     try {
-      const startStatus = await httpFunction(
-        "https://whoisfaster.onrender.com/getGameState"
-      );
-      const numberOfPlayers = await httpFunction(
-        "https://whoisfaster.onrender.com/playerNum"
-      );
+      const startStatus = await httpFunction(`${port}/getGameState`);
+      const numberOfPlayers = await httpFunction(`${port}/playerNum`);
       if (numberOfPlayers.usernames.length < 2) {
         classes.button.disabled = true;
       }
@@ -77,7 +72,14 @@ document.addEventListener("DOMContentLoaded", () => {
         classes.overlay.style.display = "none";
         handleRoundStart(msg.roundCount, delay);
       }, preDelay);
-      classes.button.hidden = true
+      classes.button.remove();
+    }
+    if (msg?.roundEnded) {
+      classes.circle.style.backgroundColor = "gray";
+      const newCircle = classes.circle.cloneNode(true);
+
+      classes.circle.replaceWith(newCircle);
+      classes.circle = newCircle; // Now update your reference
     }
 
     if (msg?.type === "updatedNames") {
@@ -90,14 +92,19 @@ document.addEventListener("DOMContentLoaded", () => {
       classes.username1.forEach(
         (username) => (username.innerText = `${msg.props[0].username}`)
       );
-      classes.username2.forEach(
-        (username) => (username.innerText = `${msg.props[1].username}`)
-      );
 
-      for (let i = 0; i < msg.props[1].health; i++) {
-        const clone = classes.heart.cloneNode(true);
-        classes.heartWrapPlayer2.appendChild(clone);
+      if (msg?.props[1] === undefined) {
+        return;
+      } else {
+        classes.username2.forEach(
+          (username) => (username.innerText = `${msg.props[1].username}`)
+        );
+        for (let i = 0; i < msg.props[1].health; i++) {
+          const clone = classes.heart.cloneNode(true);
+          classes.heartWrapPlayer2.appendChild(clone);
+        }
       }
+      classes.button.disabled = false;
     }
 
     if (msg?.matchEnd) {
@@ -118,8 +125,4 @@ document.addEventListener("DOMContentLoaded", () => {
   classes.button.addEventListener("click", async () => {
     handleButtonClick();
   });
-
-  if (localStorage.getItem("gameStatus") === "true") {
-    classes.button.remove();
-  }
 });

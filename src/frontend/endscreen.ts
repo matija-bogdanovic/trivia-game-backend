@@ -1,14 +1,20 @@
+import { websocketPort } from "../ports.js";
+
 document.addEventListener("DOMContentLoaded", () => {
   const winner = document.getElementById("winner");
   const playagain = document.getElementById("playagain");
-  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  const wss = new WebSocket(`${protocol}://${window.location.host}/endscreen`);
+  const wss = new WebSocket(`${websocketPort}://${window.location.host}/endscreen`);
 
+  if (wss.readyState === WebSocket.CONNECTING) {
+    winner.innerText = "Connecting to server...";
+  }
+  
   wss.onopen = () => {
     wss.send(JSON.stringify({ getWinner: "getWinner" }));
 
     wss.onmessage = (event) => {
       const parsedEvent = JSON.parse(event.data);
+      if (parsedEvent)
       winner.innerText = `${parsedEvent.topPlayers[0]} is the winner of this match!`;
     };
   };

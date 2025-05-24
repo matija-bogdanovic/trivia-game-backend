@@ -25,6 +25,6 @@ export const classes = {
   // Heart Wrapper
   heartWrapPlayer1: document.getElementById("heartWrap1") as HTMLElement,
   heartWrapPlayer2: document.getElementById("heartWrap2") as HTMLElement,
-  circle: document.getElementById("circle") as HTMLElement,
+  circle: document.getElementById("circle") as any,
   roundCount: document.getElementById("roundCount") as HTMLElement,
 };

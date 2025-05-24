@@ -1,3 +1,4 @@
+import { websocketPort } from "../ports.js";
 import { handleJoinGame } from "./functions/handle_join_game.js";
 
 // Add proper error handling to this file later on when you finish the project
@@ -9,8 +10,7 @@ document.addEventListener("DOMContentLoaded", function (_) {
   // Get the button element and type it as HTMLButtonElement
   const button = document.getElementById("button") as HTMLButtonElement | null;
   // Create a WebSocket connection
-  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  const socket = new WebSocket(`${protocol}://${window.location.host}/`);
+  const socket = new WebSocket(`${websocketPort}://${window.location.host}/`);
 
   // Set the onmessage handler with proper typing
   socket.onmessage = (event: MessageEvent) => {

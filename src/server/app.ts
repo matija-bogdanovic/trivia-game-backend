@@ -88,10 +88,15 @@ const startServer = async () => {
         const parsed = JSON.parse(getRounds);
         const randomNumber = Math.floor(Math.random() * (10000 - 2 + 1)) + 2;
         const getGameStatus = (await client.get("gameStatus")) as string;
-
+        if (message?.joined) {
+          helperFunction({ type: "updatedNames", joined: true });
+        }
         if (message?.gameStarted) {
           helperFunction({ started: true });
           return;
+        }
+        if (message?.roundEnded) {
+          helperFunction({ roundEnded: true });
         }
 
         const roundNames = [
