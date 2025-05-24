@@ -6,7 +6,7 @@ export async function handleGetUsername() {
     "https://whoisfaster.onrender.com/getusernames"
   );
 
-  classes.heart.src = "/public/pics/heart.svg";
+  classes.heart.src = "/pics/heart.svg";
   classes.heart.width = 20;
   classes.heart.height = 20;
   classes.heartWrapPlayer1.innerHTML = ``;
