@@ -13,7 +13,7 @@ export async function handleJoinGame() {
     userCountEl.innerText = "Username mustn't be shorter than 3 letters";
     return;
   }
-  await httpFunction("http://localhost:3000/login", {
+  await httpFunction(process.env.CLIENT_ORIGIN, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
