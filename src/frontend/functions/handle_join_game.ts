@@ -13,7 +13,7 @@ export async function handleJoinGame() {
     userCountEl.innerText = "Username mustn't be shorter than 3 letters";
     return;
   }
-  await httpFunction("https://whoisfaster.onrender.com/", {
+  await httpFunction("https://whoisfaster.onrender.com/login", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
