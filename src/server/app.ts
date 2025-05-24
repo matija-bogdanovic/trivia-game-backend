@@ -8,7 +8,12 @@ import { fileURLToPath } from "url";
 import "dotenv/config";
 
 // Routes and logic
-import { attachWSServer, client, server, ws } from "./middleware/connections.js";
+import {
+  attachWSServer,
+  client,
+  server,
+  ws,
+} from "./middleware/connections.js";
 import { helperFunction } from "./apis/websocket_functions.js";
 import { getUsernames } from "./apis/get_usernames.js";
 import { pressedCircle } from "./apis/pressed_circle.js";
@@ -46,6 +51,7 @@ const startServer = async () => {
   });
 
   // Serve static frontend files
+  app.use("/build", express.static(path.join(__dirname, "../../build")));
   app.use(express.static(path.join(__dirname, "../../public")));
 
   app.get("/", (_, res) => {
@@ -68,7 +74,9 @@ const startServer = async () => {
     const isEndscreenConnection = req.url === "/endscreen";
 
     if (isGameConnection) {
-      const usernames = (await client.json.get("usernames:usernames")) as string;
+      const usernames = (await client.json.get(
+        "usernames:usernames"
+      )) as string;
       const parsedUsernames = JSON.parse(usernames)["usernames"];
       helperFunction({ type: "updatedNames", props: parsedUsernames });
     }
@@ -131,7 +139,9 @@ const startServer = async () => {
         if (parsed) {
           const flattened = [].concat(...Object.values(parsed));
           const maxHealth = Math.max(...flattened.map((u: any) => u.health));
-          const topPlayers = flattened.filter((u: any) => u.health === maxHealth);
+          const topPlayers = flattened.filter(
+            (u: any) => u.health === maxHealth
+          );
           helperFunction({
             topPlayers: topPlayers.map((u: any) => u.username),
             maxHealth,
