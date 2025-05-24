@@ -10,7 +10,7 @@ document.addEventListener("DOMContentLoaded", function (_) {
   // Get the button element and type it as HTMLButtonElement
   const button = document.getElementById("button") as HTMLButtonElement | null;
   // Create a WebSocket connection
-  const socket = new WebSocket(`${websocketPort}://${window.location.host}/`);
+  const socket = new WebSocket(`${websocketPort}/`);
 
   // Set the onmessage handler with proper typing
   socket.onmessage = (event: MessageEvent) => {
