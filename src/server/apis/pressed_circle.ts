@@ -42,7 +42,6 @@ export async function pressedCircle(req: Request, res: Response) {
   });
   if (nextRound) {
     const nextRoundKey = nextRound.toString();
-    console.log(nextRoundKey);
     await client.json.set("rounds", `$["${nextRoundKey}"]`, {
       winner: "",
       state: "started",

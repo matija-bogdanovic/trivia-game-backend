@@ -63,7 +63,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
   classes.wss.onmessage = (event) => {
     const msg = JSON.parse(event.data);
-    console.log(msg);
 
     if (msg?.gameStarted) {
       classes.roundCount.innerText = msg.roundCount;
@@ -84,7 +83,6 @@ document.addEventListener("DOMContentLoaded", () => {
     if (msg?.type === "updatedNames") {
       classes.heartWrapPlayer1.innerHTML = ``;
       classes.heartWrapPlayer2.innerHTML = ``;
-      console.log(msg);
       for (let i = 0; i < msg.props[0].health; i++) {
         const clone = classes.heart.cloneNode(true);
         classes.heartWrapPlayer1.appendChild(clone);
