@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { client } from "../middleware/connections.js";
+import { client } from "../middleware/database_conn/redis/connection.js";
 import { helperFunction } from "./websocket_functions.js";
 
 export async function startGame(req: Request, res: Response) {

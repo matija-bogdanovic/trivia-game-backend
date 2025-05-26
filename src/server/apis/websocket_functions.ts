@@ -1,4 +1,4 @@
-import { ws } from "../middleware/connections.js";
+import { ws } from "../middleware/database_conn/redis/connection.js";
 import WebSocket from "ws";
 import "dotenv/config";
 

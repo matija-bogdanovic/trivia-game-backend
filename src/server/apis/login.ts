@@ -1,5 +1,5 @@
 import { NextFunction, Request, Response } from "express";
-import { client } from "../middleware/connections.js";
+import { client } from "../middleware/database_conn/redis/connection.js";
 import jwt from "jsonwebtoken";
 
 export async function registerUser(
@@ -32,7 +32,11 @@ export async function registerUser(
         (element: any) => element.username === req.body.username
       )
     ) {
-      res.send(JSON.stringify({ error: "That username already exists in the database!" }));
+      res.send(
+        JSON.stringify({
+          error: "That username already exists in the database!",
+        })
+      );
     } else {
       const token = jwt.sign(
         { username: req.body.username },

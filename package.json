@@ -9,8 +9,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "clean": "rm -rf build",
     "build": "npm run clean && tsc",
-  "copy:public": "mkdir -p build && cp -r public/* build/",
-  "copy:frontend": "mkdir -p build/frontend && cp -r src/frontend/* build/frontend/",
+    "copy:public": "mkdir -p build && cp -r public/* build/",
+    "copy:frontend": "mkdir -p build/frontend && cp -r src/frontend/* build/frontend/",
     "start": "node build/server/app.js"
   },
   "author": "",
@@ -29,6 +29,7 @@
   },
   "dependencies": {
     "@types/express": "^5.0.1",
+    "aws-sdk": "^2.1692.0",
     "cookie": "^1.0.2",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",

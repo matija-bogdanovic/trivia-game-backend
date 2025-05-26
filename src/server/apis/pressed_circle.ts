@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import jwt from "jsonwebtoken";
-import { client } from "../middleware/connections.js";
+import { client } from "../middleware/database_conn/redis/connection.js";
 import { helperFunction } from "./websocket_functions.js";
 
 export async function pressedCircle(req: Request, res: Response) {

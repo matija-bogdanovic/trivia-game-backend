@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { client } from "../middleware/connections";
+import { client } from "../middleware/database_conn/redis/connection";
 
 export async function gameFlow(res: Response, req: Request) {
   const getRounds = (await client.json.get("rounds")) as string;
