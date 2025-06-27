@@ -1,220 +1,385 @@
-// app.ts
-
-import express, { Request, Response } from "express";
+import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
-import jwt from "jsonwebtoken";
 import "dotenv/config";
-
-// Routes and logic
+import { client } from "./middleware/database_conn/dynamodb/connection.js";
+import router from "./apis/operations.js";
+import { createServer } from "http";
 import {
-  attachWSServer,
-  client,
-  server,
-  ws,
-} from "./middleware/database_conn/redis/connection.js";
-import { helperFunction } from "./apis/websocket_functions.js";
-import { getUsernames } from "./apis/get_usernames.js";
-import { pressedCircle } from "./apis/pressed_circle.js";
-import { startGame } from "./apis/start_game.js";
-import { registerUser } from "./apis/login.js";
-import { WebSocket } from "ws";
-import AWS from "aws-sdk";
+  DynamoDBDocumentClient,
+  GetCommand,
+  UpdateCommand,
+} from "@aws-sdk/lib-dynamodb";
+import { WebSocketServer } from "ws";
+import { broadcastMessage } from "./middleware/websocket/broadcast.js";
+import { queryByKey } from "./helpers/query_db.js";
+import { UpdateItemCommand } from "@aws-sdk/client-dynamodb";
 
-const app = express();
+export const app = express();
+const server = createServer(app);
+export const wss = new WebSocketServer({ noServer: true });
 
-const dynamoDb = new AWS.DynamoDB();
+server.on("upgrade", (request, socket, head) => {
+  wss.handleUpgrade(request, socket, head, (websocket) => {
+    wss.emit("connection", websocket, request);
+  });
+});
 
-dynamoDb
-  .putItem({
-    TableName: "Players",
-    Item: {
-      id: { S: "user123" },
-      username: { S: "Ognjanija govnarija" },
-      email: { S: "nomail" },
-    },
-  })
-  .promise();
+wss.on("connection", (ws) => {
+  ws.on("message", async (message) => {
+    try {
+      const parsed = JSON.parse(message.toString());
 
-// Connect Redis
-await client.connect();
+      if (parsed.message === "question_retrieval") {
+        const queriedItem = await queryByKey(
+          "Lobbies",
+          "code",
+          Number(parsed.code),
+          "code-index"
+        );
+        const data = queriedItem[0];
+        const index = data.rounds.findIndex(
+          (r: { status: string }) => r.status === "started"
+        );
 
-// Middleware
-app.use(cors({ origin: "http://localhost:3001", credentials: true }));
+        const oppositeAnswerer = data.rounds[index].currentlyAnswering;
+        const oppositeAnswererToUpdate = data.players.find(
+          (p: { player: string }) => p.player !== oppositeAnswerer
+        );
+
+        const randomQuestionId = Math.floor(Math.random() * 14) + 1;
+
+        await docClient.send(
+          new UpdateCommand({
+            TableName: "Lobbies",
+            Key: { lobby_id: data.lobby_id },
+            UpdateExpression: `
+      SET 
+        #rounds[${index}].#currentlyAnswering = :currentlyAnswering,
+        #rounds[${index}].#currentQuestionId = :currentQuestionId,
+    `,
+            ExpressionAttributeNames: {
+              "#rounds": "rounds",
+              "#currentlyAnswering": "currentlyAnswering",
+              "#currentQuestionId": "currentQuestionId",
+            },
+            ExpressionAttributeValues: {
+              ":currentlyAnswering": oppositeAnswererToUpdate.player,
+              ":currentQuestionId": String(randomQuestionId),
+              ":status": "started",
+            },
+            ReturnValues: "ALL_NEW",
+          })
+        );
+
+        // Get the question data
+        const questionData = await docClient.send(
+          new GetCommand({
+            TableName: "Questions",
+            Key: {
+              question_id: String(randomQuestionId),
+            },
+          })
+        );
+        // Combine both into a single broadcast payload
+        broadcastMessage(wss, {
+          type: "question_retrieval",
+          question_details: questionData.Item,
+        });
+      } else if (parsed.message === "submit_answer") {
+        try {
+          const questions = await docClient.send(
+            new GetCommand({
+              TableName: "Questions",
+              Key: {
+                question_id: String(parsed.questionId),
+              },
+            })
+          );
+          const lobbies = await queryByKey(
+            "Lobbies",
+            "code",
+            Number(parsed.roomCode),
+            "code-index"
+          );
+
+          const question = questions.Item;
+
+          if (!question) {
+            return broadcastMessage(wss, { message: "Question not found" });
+          }
+
+          const isCorrect = question.answer === parsed.selectedOption;
+
+          if (isCorrect) {
+            return broadcastMessage(wss, {
+              status: true,
+              username: parsed.username,
+              message: "Correct!",
+              correctAnswer: question.answer,
+              type: "submit_answer",
+            });
+          } else {
+            const item = lobbies[0];
+            const rounds = item.rounds;
+            const roundStatus = rounds.findIndex(
+              (r: any) => r.status === "started"
+            );
+
+            if (roundStatus !== -1) {
+              await docClient.send(
+                new UpdateCommand({
+                  TableName: "Lobbies",
+                  Key: { lobby_id: String(item.lobby_id) },
+                  UpdateExpression: `SET #rounds[${roundStatus}].#status = :status`,
+                  ExpressionAttributeNames: {
+                    "#rounds": "rounds",
+                    "#status": "status",
+                  },
+                  ExpressionAttributeValues: {
+                    ":status": "finished",
+                  },
+                })
+              );
+            } else {
+              console.warn("No active round with status 'started' found.");
+            }
+
+            return broadcastMessage(wss, {
+              status: false,
+              username: parsed.username,
+              correctAnswer: question.answer,
+              type: "submit_answer",
+            });
+          }
+        } catch (error) {
+          console.error("Error checking answer:", error);
+          return broadcastMessage(wss, { message: "Internal server error" });
+        }
+      } else if (parsed.message === "join_message") {
+        try {
+          if (isNaN(parsed.roomCode)) {
+            ws.send(JSON.stringify({ message: "Invalid room code" }));
+          }
+
+          const items = await queryByKey(
+            "Lobbies",
+            "code",
+            Number(parsed.roomCode),
+            "code-index"
+          );
+          const data = items[0];
+          data.type = "join_message";
+          if (!data) {
+            return ws.send(JSON.stringify({ message: "Room not found" }));
+          }
+
+          const primaryKey = data.lobby_id;
+          const players = data.players || [];
+
+          const playerExists = players.some(
+            (p: any) => p.player === parsed.username
+          );
+
+          if (playerExists) {
+            const updatedItems = items[0];
+            updatedItems.message =
+              "A player already exists in the database, nothing had changed.";
+            broadcastMessage(wss, updatedItems);
+          } else {
+            const updateParams = {
+              TableName: "Lobbies",
+              Key: { lobby_id: String(primaryKey) },
+              UpdateExpression:
+                "SET players = list_append(if_not_exists(players, :emptyList), :newPlayerList)",
+              ExpressionAttributeValues: {
+                ":newPlayerList": [
+                  {
+                    id: parsed.id,
+                    player: parsed.username,
+                    role: "Member",
+                    points: 500,
+                  },
+                ],
+                ":emptyList": [],
+              },
+              ReturnValues: "ALL_NEW" as const,
+            };
+            await docClient.send(new UpdateCommand(updateParams));
+            const roomitem = await queryByKey(
+              "Lobbies",
+              "code",
+              Number(parsed.roomCode),
+              "code-index"
+            );
+            const updatedItems = roomitem[0];
+            updatedItems.type = "join_message";
+            broadcastMessage(wss, updatedItems);
+          }
+        } catch (error) {
+          console.error("Something went wrong:", error);
+          return ws.send(JSON.stringify({ message: "Server error" }));
+        }
+      } else if (parsed.message === "game_start") {
+        const code = Number(parsed.code);
+
+        const room = await queryByKey(
+          "Lobbies",
+          "code",
+          Number(code),
+          "code-index"
+        );
+        const data = room[0];
+
+        if (!data) {
+          return broadcastMessage(wss, { message: "No room found!" });
+        }
+
+        const playersArray = data.players;
+
+        if (playersArray.length === 0) {
+          return broadcastMessage(wss, { message: "No players in the room!" });
+        }
+
+        const randomQuestionId = Math.floor(Math.random() * 14) + 1;
+        const randomPlayer =
+          playersArray[Math.floor(Math.random() * playersArray.length)];
+        const index = data.rounds.findIndex(
+          (data: {
+            status: string;
+            currentQuestionId: string;
+            currentlyAnswering: string;
+          }) => data.status === "notStarted"
+        );
+        await client.send(
+          new UpdateCommand({
+            TableName: "Lobbies",
+            Key: { lobby_id: String(data.lobby_id) },
+            UpdateExpression: `SET #rounds[${index}].#status = :status, #rounds[${index}].#currentlyAnswering = :randomPlayer, #rounds[${index}].#currentQuestionId = :currentQuestionId`,
+            ExpressionAttributeNames: {
+              "#rounds": "rounds",
+              "#status": "status",
+              "#currentlyAnswering": "currentlyAnswering",
+              "#currentQuestionId": "currentQuestionId",
+            },
+            ExpressionAttributeValues: {
+              ":currentQuestionId": randomQuestionId,
+              ":randomPlayer": String(randomPlayer.player),
+              ":status": "started",
+            },
+            ReturnValues: "ALL_NEW" as const,
+          })
+        );
+        const updatedResults = await queryByKey(
+          "Lobbies",
+          "code",
+          Number(parsed.code),
+          "code-index"
+        );
+        const updatedIndex = updatedResults[0].rounds.findIndex(
+          (data: {
+            status: string;
+            currentQuestionId: string;
+            currentlyAnswering: string;
+          }) => data.status === "started"
+        );
+        const player =
+          updatedResults[0].rounds[updatedIndex].currentlyAnswering;
+        const question = await client.send(
+          new GetCommand({
+            TableName: "Questions",
+            Key: {
+              question_id: String(
+                updatedResults[0].rounds[updatedIndex].currentQuestionId
+              ),
+            },
+          })
+        );
+
+        broadcastMessage(wss, {
+          type: "game_start",
+          selected_player: player,
+          question_details: question.Item,
+        });
+      } else if (parsed.message === "number_of_players") {
+        const result = await queryByKey(
+          "Lobbies",
+          "code",
+          Number(parsed.code),
+          "code-index"
+        );
+
+        const item = result[0];
+        item.type = "number_of_players";
+        broadcastMessage(wss, item);
+      } else if (parsed.message === "change_current_player") {
+        try {
+          const queriedItem = await queryByKey(
+            "Lobbies",
+            "code",
+            Number(parsed.code),
+            "code-index"
+          );
+          const data = queriedItem[0]
+          const index = data.rounds.findIndex(
+            (data: {
+              status: string;
+              currentQuestionId: string;
+              currentlyAnswering: string;
+            }) => data.status === "started"
+          );
+          const oppositeAnswerer = data.rounds[index].currentlyAnswering;
+          const oppositeAnswererToUpdate = data.players.find(
+            (data: {
+              id: string;
+              player: string;
+              points: number;
+              role: string;
+            }) => data.player !== oppositeAnswerer
+          );
+          const randomQuestionId = Math.floor(Math.random() * 14) + 1;
+          await client.send(
+            new UpdateItemCommand({
+              TableName: "Lobbies",
+              Key: { lobby_id: { S: String(data.lobby_id) } },
+              UpdateExpression: `
+      SET 
+        #rounds[${index}].#currentlyAnswering = :currentlyAnswering,
+        #rounds[${index}].#currentQuestionId = :questionId
+    `,
+              ExpressionAttributeNames: {
+                "#rounds": "rounds",
+                "#currentlyAnswering": "currentlyAnswering",
+                "#currentQuestionId": "currentQuestionId",
+              },
+              ExpressionAttributeValues: {
+                ":questionId": { S: String(randomQuestionId) },
+                ":currentlyAnswering": {
+                  S: String(oppositeAnswererToUpdate.player),
+                },
+              },
+              ReturnValues: "ALL_NEW",
+            })
+          );
+        } catch (error) {
+          console.error(error);
+          return ws.send(JSON.stringify({ error: "Internal server error" }));
+        }
+      }
+    } catch (err) {
+      console.error("WebSocket message error:", err);
+      ws.send(
+        JSON.stringify({ type: "error", message: "Internal server error" })
+      );
+    }
+  });
+});
+app.use(cors({ origin: "http://localhost:3000", credentials: true }));
 app.use(cookieParser());
 app.use(express.json());
 
-// API routes
-app.post("/login", registerUser);
-app.post("/pressedCircle", pressedCircle);
-app.post("/startGame", startGame);
+export const docClient = DynamoDBDocumentClient.from(client);
 
-app.get("/getusernames", getUsernames);
-app.get("/getGameState", async (_: Request, res: Response) => {
-  const dbData = (await client.get("gameStatus")) as string;
-  res.json({ gameState: dbData });
-});
-app.get("/playerNum", async (_: Request, res: Response) => {
-  const usernames = (await client.json.get("usernames:usernames")) as string;
-  const parsedUsernames = JSON.parse(usernames);
-  res.json(parsedUsernames);
-});
-
-// Attach WebSocket server
-attachWSServer();
-server.on("request", app);
-
-// WebSocket logic
-ws.on("connection", async (wss: WebSocket & { username?: string }, req) => {
-  const isHomePage = req.url === "/";
-  const isGameConnection = req.url === "/game";
-  const isEndscreenConnection = req.url === "/endscreen";
-  if (isHomePage) {
-    const usernames = (await client.json.get("usernames:usernames")) as string;
-    const parsedUsernames = JSON.parse(usernames)["usernames"];
-    helperFunction({ parsedUsernames: parsedUsernames });
-  }
-  if (isGameConnection) {
-    const usernames = (await client.json.get("usernames:usernames")) as string;
-    const parsedUsernames = JSON.parse(usernames)["usernames"];
-    helperFunction({ type: "updatedNames", props: parsedUsernames });
-  }
-
-  wss.on("message", async (event: string) => {
-    if (isHomePage) {
-      const message = JSON.parse(event);
-      const cookieCheck = req.headers.cookie || "";
-      const hasToken = /(?:^|;\s*)token=([^;]+)/.test(cookieCheck);
-      if (message?.getCookie && hasToken) {
-        const tokenvalue = req.headers.cookie;
-        const tokenMatch = tokenvalue.match(/token=([^;]+)/);
-        const token = tokenMatch ? tokenMatch[1] : null;
-        const verified = jwt.verify(token, process.env.SECRET) as any;
-
-        console.log(verified);
-        wss.send(
-          JSON.stringify({
-            username: verified.username,
-            type: "retrievedUsername",
-          })
-        );
-      } else if (!hasToken) {
-        wss.send(JSON.stringify({ noCookie: true }));
-      }
-      if (message.retrieveUsers) {
-        const usernames = await client.json.get("usernames:usernames");
-        helperFunction({ parsedUsernames: usernames });
-      }
-    }
-
-    if (isGameConnection) {
-      const message = JSON.parse(event);
-      const getRounds = (await client.json.get("rounds")) as any;
-      const parsed = JSON.parse(getRounds);
-      const randomNumber = Math.floor(Math.random() * (10000 - 2 + 1)) + 2;
-      const getGameStatus = (await client.get("gameStatus")) as string;
-      if (message?.joined) {
-        wss.username = message.username;
-        console.log(message?.username);
-        const usernames = (await client.json.get(
-          "usernames:usernames"
-        )) as string;
-        const parsedUsernames = JSON.parse(usernames)["usernames"];
-        helperFunction({
-          type: "updatedNames",
-          joined: true,
-          props: parsedUsernames,
-        });
-      }
-      if (message?.gameStarted) {
-        helperFunction({ started: true });
-        return;
-      }
-      if (message?.roundEnded) {
-        helperFunction({ roundEnded: true });
-      }
-
-      const roundNames = [
-        "First Round",
-        "Second Round",
-        "Third Round",
-        "Fourth Round",
-        "Fifth Round",
-      ];
-
-      for (const round of roundNames) {
-        const state = parsed[round]?.state;
-        if (state === "started") {
-          helperFunction({
-            roundCount: round,
-            randomNumber,
-            gameStarted: JSON.parse(getGameStatus),
-          });
-          return;
-        } else if (round === "Fifth Round" && state === "finished") {
-          await client.set("gameStatus", "false");
-          helperFunction({ matchEnd: true });
-          return;
-        }
-      }
-    }
-
-    if (isEndscreenConnection) {
-      const users = (await client.json.get("usernames:usernames")) as string;
-      const parsed = JSON.parse(users);
-      const message = JSON.parse(event);
-
-      if (message?.playAgain) {
-        await client.json.set("rounds", "$", {
-          "First Round": { winner: "", state: "notStarted" },
-          "Second Round": { winner: "", state: "notStarted" },
-          "Third Round": { winner: "", state: "notStarted" },
-          "Fourth Round": { winner: "", state: "notStarted" },
-          "Fifth Round": { winner: "", state: "notStarted" },
-        });
-        await client.set("gameStatus", "false");
-        await client.json.set("usernames:usernames", "$", { usernames: [] });
-      }
-
-      if (parsed) {
-        const flattened = [].concat(...Object.values(parsed));
-        const maxHealth = Math.max(...flattened.map((u: any) => u.health));
-        const topPlayers = flattened.filter((u: any) => u.health === maxHealth);
-        helperFunction({
-          topPlayers: topPlayers.map((u: any) => u.username),
-          maxHealth,
-        });
-      } else {
-        helperFunction({ topPlayers: [], maxHealth: null });
-      }
-    }
-  });
-
-  wss.on("close", async () => {
-    if (isGameConnection) {
-      if (wss.username) {
-        console.log(`${wss.username} disconnected`);
-
-        const usernames = (await client.json.get("usernames:usernames")) as any;
-        if (usernames?.usernames) {
-          const updated = usernames.usernames.filter(
-            (u: any) => u.username !== wss.username
-          );
-          await client.json.set("usernames:usernames", "$", {
-            usernames: updated,
-          });
-
-          helperFunction({ type: "updatedNames", props: updated });
-        }
-      }
-    }
-  });
-});
-
-ws.on("close", () => {
-  console.log("WebSocket connection closed");
-});
-
-server.listen(Number(process.env.PORT), () => {
-  console.log(`Server running on port ${process.env.PORT}`);
-});
+app.use("/", router);
+// Middleware
+server.listen(process.env.PORT);

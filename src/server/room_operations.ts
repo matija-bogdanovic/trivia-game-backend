@@ -1,0 +1,9 @@
+class RoomOperations {
+  constructor() {
+
+  }
+
+  gameJoin() {
+
+  }
+}
