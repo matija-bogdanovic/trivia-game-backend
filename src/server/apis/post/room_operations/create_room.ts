@@ -22,7 +22,6 @@ export default async function createRoom(
         Item: {
           lobby_id: uuid4(),
           createdAt: dateNow,
-          admin: String(createdBy),
           roomName: String(roomName),
           code: Number(roomCode),
           players: [

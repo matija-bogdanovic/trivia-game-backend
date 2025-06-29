@@ -56,7 +56,7 @@ wss.on("connection", (ws) => {
             UpdateExpression: `
       SET 
         #rounds[${index}].#currentlyAnswering = :currentlyAnswering,
-        #rounds[${index}].#currentQuestionId = :currentQuestionId,
+        #rounds[${index}].#currentQuestionId = :currentQuestionId
     `,
             ExpressionAttributeNames: {
               "#rounds": "rounds",
@@ -66,7 +66,6 @@ wss.on("connection", (ws) => {
             ExpressionAttributeValues: {
               ":currentlyAnswering": oppositeAnswererToUpdate.player,
               ":currentQuestionId": String(randomQuestionId),
-              ":status": "started",
             },
             ReturnValues: "ALL_NEW",
           })
@@ -102,6 +101,15 @@ wss.on("connection", (ws) => {
             Number(parsed.roomCode),
             "code-index"
           );
+          const activeRound = lobbies[0].rounds.findIndex(
+            (data: {
+              status: string;
+              currentlyAnswering: string;
+              currentQuestionId: string;
+            }) => data.status === "started"
+          );
+          const currentlyAnsweringPlayer =
+            lobbies[0].rounds[activeRound].currentlyAnswering;
 
           const question = questions.Item;
 
@@ -114,7 +122,7 @@ wss.on("connection", (ws) => {
           if (isCorrect) {
             return broadcastMessage(wss, {
               status: true,
-              username: parsed.username,
+              username: currentlyAnsweringPlayer,
               message: "Correct!",
               correctAnswer: question.answer,
               type: "submit_answer",
@@ -255,7 +263,7 @@ wss.on("connection", (ws) => {
           new UpdateCommand({
             TableName: "Lobbies",
             Key: { lobby_id: String(data.lobby_id) },
-            UpdateExpression: `SET #rounds[${index}].#status = :status, #rounds[${index}].#currentlyAnswering = :randomPlayer, #rounds[${index}].#currentQuestionId = :currentQuestionId`,
+            UpdateExpression: `SET #rounds[${index}].#status = :status, #rounds[${index}].#currentlyAnswering = :currentlyAnswering, #rounds[${index}].#currentQuestionId = :currentQuestionId`,
             ExpressionAttributeNames: {
               "#rounds": "rounds",
               "#status": "status",
@@ -264,7 +272,7 @@ wss.on("connection", (ws) => {
             },
             ExpressionAttributeValues: {
               ":currentQuestionId": randomQuestionId,
-              ":randomPlayer": String(randomPlayer.player),
+              ":currentlyAnswering": String(randomPlayer.player),
               ":status": "started",
             },
             ReturnValues: "ALL_NEW" as const,
@@ -310,8 +318,18 @@ wss.on("connection", (ws) => {
         );
 
         const item = result[0];
-        item.type = "number_of_players";
-        broadcastMessage(wss, item);
+        const active_round = item.rounds.find(
+          (data: {
+            status: string;
+            currentlyAnswering: string;
+            currentQuestionId: string;
+          }) => data.status === "started"
+        );
+        broadcastMessage(wss, {
+          activeRound: active_round,
+          players: item.players,
+          type: "number_of_players",
+        });
       } else if (parsed.message === "change_current_player") {
         try {
           const queriedItem = await queryByKey(
@@ -320,47 +338,78 @@ wss.on("connection", (ws) => {
             Number(parsed.code),
             "code-index"
           );
-          const data = queriedItem[0]
-          const index = data.rounds.findIndex(
-            (data: {
-              status: string;
-              currentQuestionId: string;
-              currentlyAnswering: string;
-            }) => data.status === "started"
-          );
-          const oppositeAnswerer = data.rounds[index].currentlyAnswering;
-          const oppositeAnswererToUpdate = data.players.find(
-            (data: {
-              id: string;
-              player: string;
-              points: number;
-              role: string;
-            }) => data.player !== oppositeAnswerer
-          );
-          const randomQuestionId = Math.floor(Math.random() * 14) + 1;
-          await client.send(
-            new UpdateItemCommand({
-              TableName: "Lobbies",
-              Key: { lobby_id: { S: String(data.lobby_id) } },
-              UpdateExpression: `
+          const data = queriedItem[0];
+          if (data.players.length === 2) {
+            const index_started_round = data.rounds.findIndex(
+              (data: {
+                status: string;
+                currentQuestionId: string;
+                currentlyAnswering: string;
+              }) => data.status === "started"
+            );
+
+            /**
+             * Basically a function to get the currently answering player from the found index, we are seeking a round that has the state value set to "started" in it so that's what's being done with index_started_round. The currently answering variable is a string that contains the name of the currently answering player, therefore further we are having to seek the opposite answerer to update, let's say that we have ["XmatV2", "Mata"] in the players array and we want to select the one that is not currently answering. If the player Mata is currently answering we are going to be prompted with XmatV2 as the player that is not currently answering. This method only works when there are 2 players in the array, if there are more it's just a standard protocol of selecting the players by randomness, which I will have to write the algorithm for. 
+             *  */
+            const currently_answering: string =
+              data.rounds[index_started_round].currentlyAnswering;
+            // Gives the player opposite to the one that's currently answering 
+            const oppositeAnswererToUpdate = data.players.find(
+              (data: {
+                id: string;
+                player: string;
+                points: number;
+                role: string;
+              }) => data.player !== currently_answering
+            );
+            // Gives the random question id 
+            const randomQuestionId = Math.floor(Math.random() * 14) + 1;
+
+            // Update command, updating the database with the opposite answerer we got previously if the current one was Mata we update it with XmatV2. Question id is simoultaneously changed and tossed over to the database for which i will also have to write an algorithm that memorizes and returns a different question almost always and there is a rare chance that it will ever return the same question after some time.
+            await client.send(
+              new UpdateItemCommand({
+                TableName: "Lobbies",
+                Key: { lobby_id: { S: String(data.lobby_id) } },
+                UpdateExpression: `
       SET 
-        #rounds[${index}].#currentlyAnswering = :currentlyAnswering,
-        #rounds[${index}].#currentQuestionId = :questionId
+        #rounds[${index_started_round}].#currentlyAnswering = :currentlyAnswering,
+        #rounds[${index_started_round}].#currentQuestionId = :questionId
     `,
-              ExpressionAttributeNames: {
-                "#rounds": "rounds",
-                "#currentlyAnswering": "currentlyAnswering",
-                "#currentQuestionId": "currentQuestionId",
-              },
-              ExpressionAttributeValues: {
-                ":questionId": { S: String(randomQuestionId) },
-                ":currentlyAnswering": {
-                  S: String(oppositeAnswererToUpdate.player),
+                ExpressionAttributeNames: {
+                  "#rounds": "rounds",
+                  "#currentlyAnswering": "currentlyAnswering",
+                  "#currentQuestionId": "currentQuestionId",
                 },
-              },
-              ReturnValues: "ALL_NEW",
-            })
-          );
+                ExpressionAttributeValues: {
+                  ":questionId": { S: String(randomQuestionId) },
+                  ":currentlyAnswering": {
+                    S: String(oppositeAnswererToUpdate.player),
+                  },
+                },
+                ReturnValues: "ALL_NEW",
+              })
+            );
+            // Querying again for the database with newly updated attributes
+            const queryDatabase = await queryByKey(
+              "Lobbies",
+              "code",
+              Number(parsed.code),
+              "code-index"
+            );
+            const current_round = queryDatabase[0].rounds.find(
+              (data: {
+                currentQuestionId: string;
+                currentlyAnswering: string;
+                status: string;
+              }) => data.status === "started"
+            );
+            broadcastMessage(wss, {
+              type: "change_current_player",
+              players: queryDatabase[0].players,
+              activeRound: current_round,
+            });
+          } else {
+          }
         } catch (error) {
           console.error(error);
           return ws.send(JSON.stringify({ error: "Internal server error" }));
