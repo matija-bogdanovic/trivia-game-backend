@@ -6,7 +6,14 @@ export type GamePhase =
   | "betting"
   | "reveal"
   | "picking"
+  | "duel"
   | "gameover";
+
+/** numeric closest-guess question used in duels */
+export interface GuessQuestion {
+  text: string;
+  value: number;
+}
 
 export type BetChoice = "correct" | "wrong";
 
@@ -31,6 +38,8 @@ export interface GamePlayer {
   alive: boolean;
   connected: boolean;
   isHost: boolean;
+  /** lifetime consecutive-win streak, shown in the lobby */
+  streak: number;
 }
 
 export interface GameQuestion {

@@ -1,7 +1,95 @@
 import { ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { readFileSync } from "fs";
 import { docClient } from "../app.js";
-import { GameQuestion } from "./types.js";
+import { GameQuestion, GuessQuestion } from "./types.js";
+
+function randInt(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+let mathCounter = 0;
+
+/** generated arithmetic question: harder tiers get harder forms */
+export function generateMathQuestion(difficulty: number): GameQuestion {
+  let text: string;
+  let answer: number;
+
+  if (difficulty <= 1) {
+    const a = randInt(3, 60);
+    const b = randInt(2, 40);
+    if (Math.random() < 0.5) {
+      text = `${a} + ${b} = ?`;
+      answer = a + b;
+    } else {
+      const [hi, lo] = a >= b ? [a, b] : [b, a];
+      text = `${hi} - ${lo} = ?`;
+      answer = hi - lo;
+    }
+  } else if (difficulty === 2) {
+    if (Math.random() < 0.5) {
+      const a = randInt(3, 12);
+      const b = randInt(3, 12);
+      text = `${a} × ${b} = ?`;
+      answer = a * b;
+    } else {
+      const b = randInt(2, 12);
+      const q = randInt(2, 12);
+      text = `${b * q} ÷ ${b} = ?`;
+      answer = q;
+    }
+  } else {
+    const form = randInt(0, 2);
+    const a = randInt(2, 9);
+    const b = randInt(2, 9);
+    const c = randInt(2, 9);
+    if (form === 0) {
+      text = `${a} + ${b} × ${c} = ?`;
+      answer = a + b * c;
+    } else if (form === 1) {
+      text = `(${a} + ${b}) × ${c} = ?`;
+      answer = (a + b) * c;
+    } else {
+      const x = randInt(2, 12);
+      text = `${a}x + ${b} = ${a * x + b}, x = ?`;
+      answer = x;
+    }
+  }
+
+  // distractors close enough to be tempting
+  const options = new Set<number>([answer]);
+  while (options.size < 4) {
+    const spread = Math.max(2, Math.round(Math.abs(answer) / 5));
+    const candidate =
+      answer + (Math.random() < 0.5 ? -1 : 1) * randInt(1, spread + 2);
+    if (candidate !== answer && candidate >= 0) options.add(candidate);
+  }
+  return {
+    id: `math-${++mathCounter}`,
+    text,
+    options: shuffle([...options].map(String)),
+    answer: String(answer),
+    difficulty: Math.min(3, Math.max(1, difficulty)),
+  };
+}
+
+const GUESS_QUESTIONS: GuessQuestion[] = [
+  { text: "In what year did World War II end?", value: 1945 },
+  { text: "In what year did the Titanic sink?", value: 1912 },
+  { text: "In what year did humans first land on the Moon?", value: 1969 },
+  { text: "In what year did the Berlin Wall fall?", value: 1989 },
+  { text: "How tall is Mount Everest, in meters?", value: 8849 },
+  { text: "In what year was the first iPhone released?", value: 2007 },
+  { text: "How many bones does an adult human body have?", value: 206 },
+  { text: "In what year did the French Revolution begin?", value: 1789 },
+  { text: "How long is the Danube river, in kilometers?", value: 2850 },
+  { text: "In what year was Nikola Tesla born?", value: 1856 },
+  { text: "How many chemical elements are in the periodic table?", value: 118 },
+  { text: "In what year was the Eiffel Tower completed?", value: 1889 },
+];
+
+export function drawGuessQuestion(): GuessQuestion {
+  return GUESS_QUESTIONS[randInt(0, GUESS_QUESTIONS.length - 1)];
+}
 
 /**
  * Raw question records can come from DynamoDB or questions.json and are not

@@ -1,9 +1,13 @@
 import { WebSocket } from "ws";
-import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  DeleteCommand,
+  GetCommand,
+  UpdateCommand,
+} from "@aws-sdk/lib-dynamodb";
 import { docClient } from "../app.js";
 import { queryByKey } from "../helpers/query_db.js";
 import { GameRoom } from "./room.js";
-import { recordGameResult } from "./wallet.js";
+import { getWallet, recordGameResult } from "./wallet.js";
 
 const rooms = new Map<number, GameRoom>();
 
@@ -14,6 +18,14 @@ export function getLiveRoomSummaries() {
     connectedCount: [...room.players.values()].filter((p) => p.connected)
       .length,
   }));
+}
+
+export function isUserOnline(username: string): boolean {
+  for (const room of rooms.values()) {
+    const p = room.players.get(username);
+    if (p?.connected) return true;
+  }
+  return false;
 }
 
 async function getOrCreateRoom(code: number): Promise<GameRoom | null> {
@@ -31,8 +43,44 @@ async function getOrCreateRoom(code: number): Promise<GameRoom | null> {
   }
   room.onEmpty = () => rooms.delete(code);
   room.onGameOver = persistResults;
+  room.onPlayerKicked = removeFromLobbyRecord;
+  room.onTerminated = (r) => {
+    rooms.delete(r.code);
+    deleteLobbyRecord(r).catch((err) =>
+      console.error("Failed to delete lobby record:", err)
+    );
+  };
   rooms.set(code, room);
   return room;
+}
+
+async function removeFromLobbyRecord(room: GameRoom, username: string) {
+  if (!room.lobbyId) return;
+  try {
+    const res = await docClient.send(
+      new GetCommand({ TableName: "Lobbies", Key: { lobby_id: room.lobbyId } })
+    );
+    const players = (res.Item?.players ?? []).filter(
+      (p: any) => p.player !== username
+    );
+    await docClient.send(
+      new UpdateCommand({
+        TableName: "Lobbies",
+        Key: { lobby_id: room.lobbyId },
+        UpdateExpression: "SET players = :players",
+        ExpressionAttributeValues: { ":players": players },
+      })
+    );
+  } catch (err) {
+    console.error("Failed to remove kicked player from lobby record:", err);
+  }
+}
+
+async function deleteLobbyRecord(room: GameRoom) {
+  if (!room.lobbyId) return;
+  await docClient.send(
+    new DeleteCommand({ TableName: "Lobbies", Key: { lobby_id: room.lobbyId } })
+  );
 }
 
 async function persistResults(room: GameRoom) {
@@ -43,10 +91,30 @@ async function persistResults(room: GameRoom) {
       if (a.alive !== b.alive) return a.alive ? -1 : 1;
       return b.money - a.money;
     })[0]?.username ?? null;
-  recordGameResult(
-    players.map((p) => p.username),
-    winner
-  ).catch((err) => console.error("recordGameResult failed:", err));
+
+  recordGameResult(room.getGameStats(winner))
+    .then(async (unlocked) => {
+      for (const [username, achievements] of unlocked) {
+        room.broadcast({
+          type: "achievements_unlocked",
+          username,
+          achievements: achievements.map((a) => ({ id: a.id, name: a.name })),
+        });
+        room.announce(
+          `🏅 ${username} unlocked: ${achievements.map((a) => a.name).join(", ")}`
+        );
+      }
+      // refresh lobby streak badges for the next match
+      for (const p of players) {
+        try {
+          const wallet = await getWallet(p.username);
+          room.setPlayerStreak(p.username, wallet.currentStreak);
+        } catch {
+          // cosmetic only
+        }
+      }
+    })
+    .catch((err) => console.error("recordGameResult failed:", err));
 
   if (!room.lobbyId) return;
   try {
@@ -112,6 +180,11 @@ export function handleGameConnection(ws: WebSocket, url: string) {
             ? msg.avatar
             : null;
         room.connect(ws, username, avatar);
+        // hydrate the lobby streak badge (cosmetic, so best-effort)
+        const joinedRoom = room;
+        getWallet(username)
+          .then((w) => joinedRoom.setPlayerStreak(username, w.currentStreak))
+          .catch(() => {});
       } else if (room) {
         room.handleMessage(ws, msg);
       }

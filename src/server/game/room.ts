@@ -4,9 +4,15 @@ import {
   GamePhase,
   GamePlayer,
   GameQuestion,
+  GuessQuestion,
   PlacedBet,
 } from "./types.js";
-import { loadQuestions, QuestionDeck } from "./questions.js";
+import {
+  drawGuessQuestion,
+  generateMathQuestion,
+  loadQuestions,
+  QuestionDeck,
+} from "./questions.js";
 
 export const MIN_PLAYERS = 2;
 const COUNTDOWN_SECONDS = 3;
@@ -16,6 +22,10 @@ const MIN_QUESTION_TIME_MS = 8000;
 const BETTING_TIME_MS = 4500;
 const REVEAL_MS = 5000;
 const PICK_TIME_MS = 15000;
+const MATH_QUESTION_CHANCE = 0.3;
+const DUEL_CHANCE = 0.5;
+const DUEL_TIME_MS = 20000;
+const DUEL_LOSER_COST = 100;
 const EMPTY_ROOM_GRACE_MS = 60000;
 const STARTING_MONEY = 500;
 const WRONG_ANSWER_COST = 100;
@@ -64,8 +74,18 @@ export class GameRoom {
 
   private deck: QuestionDeck | null = null;
   private turn: Turn | null = null;
+  private duel: {
+    question: GuessQuestion;
+    players: [string, string];
+    guesses: Map<string, number>;
+  } | null = null;
   private round = 0;
   private chainDepth = 0;
+  /** per-game stats for achievement checks, keyed by username */
+  private gameStats = new Map<
+    string,
+    { betsWon: number; maxBetWin: number; wrongAnswers: number }
+  >();
   private timers = new Set<NodeJS.Timeout>();
   private emptyTimer: NodeJS.Timeout | null = null;
   private chat: ChatEntry[] = [];
@@ -75,6 +95,10 @@ export class GameRoom {
   onGameOver?: (room: GameRoom) => void;
   /** called when the room has had no connections for a while */
   onEmpty?: (room: GameRoom) => void;
+  /** called after the host kicks a player, for lobby-record cleanup */
+  onPlayerKicked?: (room: GameRoom, username: string) => void;
+  /** called when the host deletes the lobby */
+  onTerminated?: (room: GameRoom) => void;
 
   constructor(code: number, roomName: string) {
     this.code = code;
@@ -96,6 +120,7 @@ export class GameRoom {
       alive: this.phase === "lobby",
       connected: false,
       isHost: opts.isHost ?? false,
+      streak: 0,
     };
     this.players.set(username, player);
     return player;
@@ -156,12 +181,12 @@ export class GameRoom {
     }
   }
 
-  removePlayer(username: string) {
+  removePlayer(username: string, opts: { silent?: boolean } = {}) {
     const player = this.players.get(username);
     if (!player) return;
     this.players.delete(username);
     if (player.isHost) this.reassignHost();
-    this.systemChat(`${username} left the room`);
+    if (!opts.silent) this.systemChat(`${username} left the room`);
     this.turn?.bets.delete(username);
 
     if (this.phase !== "lobby" && this.phase !== "gameover") {
@@ -177,6 +202,14 @@ export class GameRoom {
           this.phase === "picking")
       ) {
         this.clearTimers();
+        this.broadcastLobbyState();
+        this.spin();
+        return;
+      }
+      // a duelist walked out mid-duel
+      if (this.phase === "duel" && this.duel?.players.includes(username)) {
+        this.clearTimers();
+        this.duel = null;
         this.broadcastLobbyState();
         this.spin();
         return;
@@ -217,7 +250,46 @@ export class GameRoom {
       alive: p.alive,
       connected: p.connected,
       isHost: p.isHost,
+      streak: p.streak,
     }));
+  }
+
+  /** lifetime win streak shown on lobby player cards */
+  setPlayerStreak(username: string, streak: number) {
+    const player = this.players.get(username);
+    if (!player || player.streak === streak) return;
+    player.streak = streak;
+    this.broadcastLobbyState();
+  }
+
+  announce(text: string) {
+    this.systemChat(text);
+  }
+
+  private ensureStats(username: string) {
+    let s = this.gameStats.get(username);
+    if (!s) {
+      s = { betsWon: 0, maxBetWin: 0, wrongAnswers: 0 };
+      this.gameStats.set(username, s);
+    }
+    return s;
+  }
+
+  getGameStats(winner: string | null) {
+    return [...this.players.values()].map((p) => {
+      const s = this.gameStats.get(p.username) ?? {
+        betsWon: 0,
+        maxBetWin: 0,
+        wrongAnswers: 0,
+      };
+      return {
+        username: p.username,
+        wonGame: p.username === winner,
+        betsWon: s.betsWon,
+        maxBetWin: s.maxBetWin,
+        wrongAnswers: s.wrongAnswers,
+      };
+    });
   }
 
   broadcastLobbyState() {
@@ -256,6 +328,9 @@ export class GameRoom {
       case "submit_answer":
         this.submitAnswer(username, String(msg.answer ?? ""));
         break;
+      case "submit_guess":
+        this.submitGuess(username, Number(msg.value));
+        break;
       case "place_bet":
         this.placeBet(username, msg.bet, Number(msg.amount));
         break;
@@ -267,6 +342,12 @@ export class GameRoom {
         break;
       case "play_again":
         this.playAgainRequest(username);
+        break;
+      case "kick_player":
+        this.kickPlayer(username, String(msg.target ?? ""));
+        break;
+      case "terminate_lobby":
+        this.terminate(username);
         break;
       case "leave":
         this.sockets.delete(ws);
@@ -345,6 +426,7 @@ export class GameRoom {
     }
 
     this.round = 0;
+    this.gameStats.clear();
     this.phase = "countdown";
     this.broadcastLobbyState();
 
@@ -370,6 +452,11 @@ export class GameRoom {
       return;
     }
     this.chainDepth = 0;
+    // head-to-head: sometimes the wheel calls a closest-guess duel instead
+    if (alive.length === 2 && Math.random() < DUEL_CHANCE) {
+      this.startDuel([alive[0].username, alive[1].username]);
+      return;
+    }
     const target = alive[Math.floor(Math.random() * alive.length)];
     this.phase = "spin";
     this.broadcast({
@@ -396,7 +483,10 @@ export class GameRoom {
     );
     this.turn = {
       answering,
-      question: this.deck.draw(difficulty),
+      question:
+        Math.random() < MATH_QUESTION_CHANCE
+          ? generateMathQuestion(difficulty)
+          : this.deck.draw(difficulty),
       askedAt: Date.now(),
       answerTimeMs,
       answer: null,
@@ -486,6 +576,7 @@ export class GameRoom {
     if (!correct && answering) {
       answererDelta = -Math.min(WRONG_ANSWER_COST, answering.money);
       answering.money += answererDelta;
+      this.ensureStats(answering.username).wrongAnswers += 1;
     }
 
     const betResults: BetResult[] = [];
@@ -496,6 +587,11 @@ export class GameRoom {
       const stake = Math.min(placed.amount, player.money);
       const moneyDelta = won ? stake : -stake;
       player.money += moneyDelta;
+      if (won) {
+        const s = this.ensureStats(bettor);
+        s.betsWon += 1;
+        s.maxBetWin = Math.max(s.maxBetWin, stake);
+      }
       betResults.push({
         username: bettor,
         bet: placed.bet,
@@ -600,6 +696,116 @@ export class GameRoom {
     this.askQuestion(target);
   }
 
+  // ---------------------------------------------------------------- duels
+
+  private startDuel(players: [string, string]) {
+    this.round += 1;
+    this.turn = null;
+    this.duel = {
+      question: drawGuessQuestion(),
+      players,
+      guesses: new Map(),
+    };
+    this.phase = "duel";
+    this.broadcast({
+      type: "duel_question",
+      round: this.round,
+      questionText: this.duel.question.text,
+      players,
+      answerTimeMs: DUEL_TIME_MS,
+    });
+    this.systemChat(`⚔️ Duel! ${players[0]} vs ${players[1]} — closest guess wins`);
+    this.setTimer(() => this.resolveDuel(), DUEL_TIME_MS);
+  }
+
+  private submitGuess(username: string, value: number) {
+    const d = this.duel;
+    if (this.phase !== "duel" || !d) return;
+    if (!d.players.includes(username) || d.guesses.has(username)) return;
+    if (!Number.isFinite(value)) return;
+    d.guesses.set(username, value);
+    this.broadcast({
+      type: "player_answered",
+      username,
+      answeredCount: d.guesses.size,
+      aliveCount: d.players.length,
+    });
+    if (d.guesses.size === d.players.length) this.resolveDuel();
+  }
+
+  private resolveDuel() {
+    const d = this.duel;
+    if (this.phase !== "duel" || !d) return;
+    this.clearTimers();
+
+    const guesses = d.players.map((username) => {
+      const guess = d.guesses.get(username) ?? null;
+      return {
+        username,
+        guess,
+        diff: guess === null ? null : Math.abs(guess - d.question.value),
+      };
+    });
+    const [a, b] = guesses;
+    const diffA = a.diff ?? Infinity;
+    const diffB = b.diff ?? Infinity;
+    const tie = diffA === diffB;
+    const winner = tie ? null : diffA < diffB ? a.username : b.username;
+    const loser = tie ? null : diffA < diffB ? b.username : a.username;
+
+    let loserDelta = 0;
+    if (loser) {
+      const player = this.players.get(loser);
+      if (player) {
+        loserDelta = -Math.min(DUEL_LOSER_COST, player.money);
+        player.money += loserDelta;
+      }
+    }
+
+    const eliminated: string[] = [];
+    for (const p of this.players.values()) {
+      if (p.alive && p.money <= 0) {
+        p.money = 0;
+        p.alive = false;
+        eliminated.push(p.username);
+      }
+    }
+
+    this.phase = "reveal";
+    this.broadcast({
+      type: "duel_result",
+      round: this.round,
+      questionText: d.question.text,
+      correctValue: d.question.value,
+      guesses,
+      winner,
+      loser,
+      tie,
+      loserDelta,
+      eliminated,
+      players: this.publicPlayers(),
+    });
+    if (tie) {
+      this.systemChat(`⚔️ The duel is a tie — nobody loses money`);
+    } else {
+      this.systemChat(
+        `⚔️ ${winner} wins the duel! ${loser} loses $${-loserDelta}`
+      );
+    }
+    for (const name of eliminated) {
+      this.systemChat(`💸 ${name} is broke and out of the game`);
+    }
+    this.duel = null;
+
+    this.setTimer(() => {
+      if (this.alivePlayers().length <= 1) {
+        this.gameOver();
+      } else {
+        this.spin();
+      }
+    }, REVEAL_MS);
+  }
+
   private gameOver() {
     this.clearTimers();
     this.phase = "gameover";
@@ -616,6 +822,36 @@ export class GameRoom {
     });
     if (winner) this.systemChat(`🏆 ${winner} wins the game!`);
     this.onGameOver?.(this);
+  }
+
+  // ---------------------------------------------------------------- host moderation
+
+  private kickPlayer(byUsername: string, target: string) {
+    const by = this.players.get(byUsername);
+    if (!by?.isHost || byUsername === target) return;
+    if (!this.players.has(target)) return;
+
+    for (const [ws, name] of [...this.sockets]) {
+      if (name === target) {
+        this.send(ws, { type: "kicked" });
+        this.sockets.delete(ws);
+        ws.close();
+      }
+    }
+    this.systemChat(`${target} was removed from the lobby by the host`);
+    this.removePlayer(target, { silent: true });
+    this.onPlayerKicked?.(this, target);
+  }
+
+  private terminate(byUsername: string) {
+    const by = this.players.get(byUsername);
+    if (!by?.isHost) return;
+    this.broadcast({ type: "lobby_terminated" });
+    this.clearTimers();
+    for (const ws of this.sockets.keys()) ws.close();
+    this.sockets.clear();
+    this.destroy();
+    this.onTerminated?.(this);
   }
 
   playAgainRequest(byUsername: string) {

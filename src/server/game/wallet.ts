@@ -6,6 +6,9 @@ export const CREDIT_REFILL_MS = 30 * 60 * 1000; // +1 credit every 30 min
 export const LOBBY_CREATE_COST = 1;
 export const COINS_PER_WIN = 100;
 export const COINS_PER_GAME = 25;
+export const POINTS_PER_WIN = 25;
+export const POINTS_STREAK_BONUS = 5; // extra per consecutive win
+export const POINTS_STREAK_BONUS_CAP = 50;
 
 export interface Wallet {
   username: string;
@@ -15,7 +18,42 @@ export interface Wallet {
   ownedAvatars: string[];
   wins: number;
   gamesPlayed: number;
+  /** leaderboard points, earned per win with a streak bonus */
+  points: number;
+  currentStreak: number;
+  bestStreak: number;
+  betsWon: number;
+  achievements: string[];
+  friends: string[];
+  /** incoming friend requests (usernames) */
+  friendRequests: string[];
 }
+
+/** per-player stats from one finished game, used for achievement checks */
+export interface GamePlayerStats {
+  username: string;
+  wonGame: boolean;
+  betsWon: number;
+  maxBetWin: number;
+  wrongAnswers: number;
+}
+
+export interface AchievementDef {
+  id: string;
+  name: string;
+  check: (wallet: Wallet, game: GamePlayerStats) => boolean;
+}
+
+export const ACHIEVEMENTS: AchievementDef[] = [
+  { id: "first_win", name: "First Blood — win your first game", check: (w) => w.wins >= 1 },
+  { id: "streak_10", name: "On Fire — win 10 games in a row", check: (w) => w.currentStreak >= 10 },
+  { id: "streak_50", name: "Unstoppable — win 50 games in a row", check: (w) => w.currentStreak >= 50 },
+  { id: "streak_100", name: "Legend — win 100 games in a row", check: (w) => w.currentStreak >= 100 },
+  { id: "first_bet_win", name: "Gambler — win money on a bet", check: (w) => w.betsWon >= 1 },
+  { id: "bet_500", name: "High Roller — win $500+ on a single bet", check: (_w, g) => g.maxBetWin >= 500 },
+  { id: "flawless_win", name: "Flawless — win without a single wrong answer", check: (_w, g) => g.wonGame && g.wrongAnswers === 0 },
+  { id: "games_50", name: "Veteran — play 50 games", check: (w) => w.gamesPlayed >= 50 },
+];
 
 export interface ShopItem {
   id: string;
@@ -45,7 +83,39 @@ function freshWallet(username: string): Wallet {
     ownedAvatars: [],
     wins: 0,
     gamesPlayed: 0,
+    points: 0,
+    currentStreak: 0,
+    bestStreak: 0,
+    betsWon: 0,
+    achievements: [],
+    friends: [],
+    friendRequests: [],
   };
+}
+
+/** older wallet rows may predate the streak/achievement fields */
+function withDefaults(wallet: Wallet): Wallet {
+  wallet.points ??= 0;
+  wallet.currentStreak ??= 0;
+  wallet.bestStreak ??= 0;
+  wallet.betsWon ??= 0;
+  wallet.achievements ??= [];
+  wallet.friends ??= [];
+  wallet.friendRequests ??= [];
+  return wallet;
+}
+
+/** like getWallet but returns null instead of inventing a row */
+export async function getWalletIfExists(
+  username: string
+): Promise<Wallet | null> {
+  const res = await docClient.send(
+    new GetCommand({ TableName: "Wallets", Key: { username } })
+  );
+  if (!res.Item) return null;
+  const wallet = withDefaults(res.Item as Wallet);
+  refill(wallet);
+  return wallet;
 }
 
 /** applies time-based credit refill in place */
@@ -75,7 +145,9 @@ export async function getWallet(username: string): Promise<Wallet> {
   const res = await docClient.send(
     new GetCommand({ TableName: "Wallets", Key: { username } })
   );
-  const wallet = (res.Item as Wallet | undefined) ?? freshWallet(username);
+  const wallet = withDefaults(
+    (res.Item as Wallet | undefined) ?? freshWallet(username)
+  );
   refill(wallet);
   return wallet;
 }
@@ -119,25 +191,110 @@ export async function buyItem(
   return wallet;
 }
 
-/** fire-and-forget game rewards + lifetime stats */
-export async function recordGameResult(
-  participants: string[],
-  winner: string | null
+// ---------------------------------------------------------------- friends
+
+/** returns an error string, or 'accepted' when it completed a mutual
+ *  request, or 'sent' when a new request was created */
+export async function sendFriendRequest(
+  from: string,
+  to: string
+): Promise<string> {
+  if (from === to) return "That's you";
+  const target = await getWalletIfExists(to);
+  if (!target) return "User not found";
+  if (target.friends.includes(from)) return "Already friends";
+
+  const me = await getWallet(from);
+  // they already asked us — treat this as an accept
+  if (me.friendRequests.includes(to)) {
+    return acceptFriendRequest(from, to);
+  }
+  if (target.friendRequests.includes(from)) return "Request already sent";
+  target.friendRequests.push(from);
+  await saveWallet(target);
+  return "sent";
+}
+
+export async function acceptFriendRequest(
+  username: string,
+  from: string
+): Promise<string> {
+  const me = await getWallet(username);
+  if (!me.friendRequests.includes(from)) return "No such request";
+  const other = await getWalletIfExists(from);
+  if (!other) return "User not found";
+  me.friendRequests = me.friendRequests.filter((u) => u !== from);
+  if (!me.friends.includes(from)) me.friends.push(from);
+  if (!other.friends.includes(username)) other.friends.push(username);
+  await Promise.all([saveWallet(me), saveWallet(other)]);
+  return "accepted";
+}
+
+export async function declineFriendRequest(
+  username: string,
+  from: string
 ): Promise<void> {
+  const me = await getWallet(username);
+  me.friendRequests = me.friendRequests.filter((u) => u !== from);
+  await saveWallet(me);
+}
+
+export async function removeFriend(
+  username: string,
+  other: string
+): Promise<void> {
+  const me = await getWallet(username);
+  me.friends = me.friends.filter((u) => u !== other);
+  await saveWallet(me);
+  const them = await getWalletIfExists(other);
+  if (them) {
+    them.friends = them.friends.filter((u) => u !== username);
+    await saveWallet(them);
+  }
+}
+
+/**
+ * Applies rewards, streaks, points, and achievement unlocks for one finished
+ * game. Returns newly unlocked achievements per player so the room can
+ * announce them.
+ */
+export async function recordGameResult(
+  stats: GamePlayerStats[]
+): Promise<Map<string, AchievementDef[]>> {
+  const unlocked = new Map<string, AchievementDef[]>();
   await Promise.all(
-    participants.map(async (username) => {
+    stats.map(async (game) => {
       try {
-        const wallet = await getWallet(username);
+        const wallet = await getWallet(game.username);
         wallet.gamesPlayed += 1;
         wallet.coins += COINS_PER_GAME;
-        if (username === winner) {
+        wallet.betsWon += game.betsWon;
+        if (game.wonGame) {
           wallet.wins += 1;
           wallet.coins += COINS_PER_WIN;
+          wallet.currentStreak += 1;
+          wallet.bestStreak = Math.max(wallet.bestStreak, wallet.currentStreak);
+          wallet.points +=
+            POINTS_PER_WIN +
+            Math.min(
+              POINTS_STREAK_BONUS_CAP,
+              POINTS_STREAK_BONUS * (wallet.currentStreak - 1)
+            );
+        } else {
+          wallet.currentStreak = 0;
         }
+
+        const fresh = ACHIEVEMENTS.filter(
+          (a) => !wallet.achievements.includes(a.id) && a.check(wallet, game)
+        );
+        wallet.achievements.push(...fresh.map((a) => a.id));
+        if (fresh.length > 0) unlocked.set(game.username, fresh);
+
         await saveWallet(wallet);
       } catch (err) {
-        console.error(`Failed to record result for ${username}:`, err);
+        console.error(`Failed to record result for ${game.username}:`, err);
       }
     })
   );
+  return unlocked;
 }

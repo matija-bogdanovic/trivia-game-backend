@@ -13,6 +13,8 @@ import submitAnswer from "./post/room_operations/check_answer.js";
 import getActiveRooms from "./get/get_lobby_count.js";
 import getRandomQuestions from "./post/room_operations/retrieve_questions.js";
 import {
+  friendActionHandler,
+  friendsListHandler,
   lobbiesHandler,
   leaderboardHandler,
   shopBuyHandler,
@@ -39,5 +41,7 @@ router.get("/lobbies", lobbiesHandler);
 router.get("/leaderboard", leaderboardHandler);
 router.post("/wallet", walletHandler);
 router.post("/shop/buy", shopBuyHandler);
+router.post("/friends/list", friendsListHandler);
+router.post("/friends/action", friendActionHandler);
 
 export default router;

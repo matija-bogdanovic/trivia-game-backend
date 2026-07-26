@@ -2,12 +2,18 @@ import { Request, Response } from "express";
 import { ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { docClient } from "../app.js";
 import {
+  acceptFriendRequest,
+  ACHIEVEMENTS,
   buyItem,
+  declineFriendRequest,
   getWallet,
+  getWalletIfExists,
   msUntilNextCredit,
+  removeFriend,
+  sendFriendRequest,
   SHOP_ITEMS,
 } from "../game/wallet.js";
-import { getLiveRoomSummaries } from "../game/manager.js";
+import { getLiveRoomSummaries, isUserOnline } from "../game/manager.js";
 
 export async function walletHandler(req: Request, res: Response): Promise<any> {
   const { username } = req.body;
@@ -22,6 +28,14 @@ export async function walletHandler(req: Request, res: Response): Promise<any> {
       ownedAvatars: wallet.ownedAvatars,
       wins: wallet.wins,
       gamesPlayed: wallet.gamesPlayed,
+      points: wallet.points,
+      currentStreak: wallet.currentStreak,
+      bestStreak: wallet.bestStreak,
+      achievements: wallet.achievements,
+      achievementCatalog: ACHIEVEMENTS.map((a) => ({
+        id: a.id,
+        name: a.name,
+      })),
       nextCreditInMs: msUntilNextCredit(wallet),
       shop: SHOP_ITEMS,
     });
@@ -97,6 +111,82 @@ export async function lobbiesHandler(_req: Request, res: Response): Promise<any>
   }
 }
 
+// ---------------------------------------------------------------- friends
+
+export async function friendsListHandler(
+  req: Request,
+  res: Response
+): Promise<any> {
+  const { username } = req.body;
+  if (!username) return res.status(400).json({ message: "username required" });
+  try {
+    const me = await getWallet(String(username));
+    const friends = await Promise.all(
+      me.friends.map(async (name) => {
+        const w = await getWalletIfExists(name);
+        return {
+          username: name,
+          online: isUserOnline(name),
+          points: w?.points ?? 0,
+          currentStreak: w?.currentStreak ?? 0,
+          wins: w?.wins ?? 0,
+        };
+      })
+    );
+    return res.json({
+      friends: friends.sort(
+        (a, b) => Number(b.online) - Number(a.online) || b.points - a.points
+      ),
+      requests: me.friendRequests,
+    });
+  } catch (err) {
+    console.error("friends list error:", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+}
+
+export async function friendActionHandler(
+  req: Request,
+  res: Response
+): Promise<any> {
+  const { username, target, action } = req.body;
+  if (!username || !target || !action) {
+    return res
+      .status(400)
+      .json({ message: "username, target and action required" });
+  }
+  try {
+    const me = String(username);
+    const them = String(target);
+    if (action === "request") {
+      const result = await sendFriendRequest(me, them);
+      if (result !== "sent" && result !== "accepted") {
+        return res.status(400).json({ message: result });
+      }
+      return res.json({ status: result });
+    }
+    if (action === "accept") {
+      const result = await acceptFriendRequest(me, them);
+      if (result !== "accepted") {
+        return res.status(400).json({ message: result });
+      }
+      return res.json({ status: result });
+    }
+    if (action === "decline") {
+      await declineFriendRequest(me, them);
+      return res.json({ status: "declined" });
+    }
+    if (action === "remove") {
+      await removeFriend(me, them);
+      return res.json({ status: "removed" });
+    }
+    return res.status(400).json({ message: "Unknown action" });
+  } catch (err) {
+    console.error("friend action error:", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+}
+
 export async function leaderboardHandler(_req: Request, res: Response): Promise<any> {
   try {
     const scan = await docClient.send(
@@ -108,9 +198,12 @@ export async function leaderboardHandler(_req: Request, res: Response): Promise<
         wins: w.wins ?? 0,
         gamesPlayed: w.gamesPlayed ?? 0,
         coins: w.coins ?? 0,
+        points: w.points ?? 0,
+        currentStreak: w.currentStreak ?? 0,
+        bestStreak: w.bestStreak ?? 0,
       }))
       .filter((w) => w.gamesPlayed > 0)
-      .sort((a, b) => b.wins - a.wins || b.coins - a.coins)
+      .sort((a, b) => b.points - a.points || b.wins - a.wins)
       .slice(0, 20);
     return res.json({ leaderboard: top });
   } catch (err) {
