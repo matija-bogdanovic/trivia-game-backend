@@ -26,6 +26,10 @@ const MATH_QUESTION_CHANCE = 0.3;
 const DUEL_CHANCE = 0.5;
 const DUEL_TIME_MS = 20000;
 const DUEL_LOSER_COST = 100;
+const CODE_SYMBOLS = ["🔴", "🟡", "🟢", "🔵", "🟣", "🟠"];
+const CODE_LENGTH = 4;
+const CODE_MAX_ATTEMPTS = 6;
+const CODE_DUEL_TIME_MS = 90000;
 const EMPTY_ROOM_GRACE_MS = 60000;
 const STARTING_MONEY = 500;
 const WRONG_ANSWER_COST = 100;
@@ -75,12 +79,22 @@ export class GameRoom {
   private deck: QuestionDeck | null = null;
   private turn: Turn | null = null;
   private duel: {
-    question: GuessQuestion;
+    kind: "guess" | "code";
     players: [string, string];
+    // closest-guess duel
+    question?: GuessQuestion;
     guesses: Map<string, number>;
+    // code-breaker duel
+    code?: string[];
+    attempts?: Map<
+      string,
+      { guess: string[]; exact: number; partial: number }[]
+    >;
   } | null = null;
   private round = 0;
   private chainDepth = 0;
+  /** who the wheel picked last — their odds drop (but stay > 0) next spin */
+  private lastSpinTarget: string | null = null;
   /** per-game stats for achievement checks, keyed by username */
   private gameStats = new Map<
     string,
@@ -331,6 +345,12 @@ export class GameRoom {
       case "submit_guess":
         this.submitGuess(username, Number(msg.value));
         break;
+      case "submit_code":
+        this.submitCode(
+          username,
+          Array.isArray(msg.guess) ? msg.guess.map(String) : []
+        );
+        break;
       case "place_bet":
         this.placeBet(username, msg.bet, Number(msg.amount));
         break;
@@ -427,6 +447,7 @@ export class GameRoom {
 
     this.round = 0;
     this.gameStats.clear();
+    this.lastSpinTarget = null;
     this.phase = "countdown";
     this.broadcastLobbyState();
 
@@ -452,12 +473,28 @@ export class GameRoom {
       return;
     }
     this.chainDepth = 0;
-    // head-to-head: sometimes the wheel calls a closest-guess duel instead
+    // head-to-head: sometimes the wheel calls a duel instead
     if (alive.length === 2 && Math.random() < DUEL_CHANCE) {
-      this.startDuel([alive[0].username, alive[1].username]);
+      const pair: [string, string] = [alive[0].username, alive[1].username];
+      if (Math.random() < 0.5) this.startDuel(pair);
+      else this.startCodeDuel(pair);
       return;
     }
-    const target = alive[Math.floor(Math.random() * alive.length)];
+    // weighted pick: whoever was picked last time is less likely (not impossible)
+    const weights = alive.map((p) =>
+      p.username === this.lastSpinTarget ? 0.4 : 1
+    );
+    const total = weights.reduce((a, b) => a + b, 0);
+    let roll = Math.random() * total;
+    let target = alive[alive.length - 1];
+    for (let i = 0; i < alive.length; i++) {
+      roll -= weights[i];
+      if (roll <= 0) {
+        target = alive[i];
+        break;
+      }
+    }
+    this.lastSpinTarget = target.username;
     this.phase = "spin";
     this.broadcast({
       type: "spin",
@@ -702,6 +739,7 @@ export class GameRoom {
     this.round += 1;
     this.turn = null;
     this.duel = {
+      kind: "guess",
       question: drawGuessQuestion(),
       players,
       guesses: new Map(),
@@ -720,7 +758,7 @@ export class GameRoom {
 
   private submitGuess(username: string, value: number) {
     const d = this.duel;
-    if (this.phase !== "duel" || !d) return;
+    if (this.phase !== "duel" || !d || d.kind !== "guess") return;
     if (!d.players.includes(username) || d.guesses.has(username)) return;
     if (!Number.isFinite(value)) return;
     d.guesses.set(username, value);
@@ -735,15 +773,17 @@ export class GameRoom {
 
   private resolveDuel() {
     const d = this.duel;
-    if (this.phase !== "duel" || !d) return;
+    if (this.phase !== "duel" || !d || d.kind !== "guess" || !d.question)
+      return;
     this.clearTimers();
 
+    const question = d.question;
     const guesses = d.players.map((username) => {
       const guess = d.guesses.get(username) ?? null;
       return {
         username,
         guess,
-        diff: guess === null ? null : Math.abs(guess - d.question.value),
+        diff: guess === null ? null : Math.abs(guess - question.value),
       };
     });
     const [a, b] = guesses;
@@ -775,8 +815,8 @@ export class GameRoom {
     this.broadcast({
       type: "duel_result",
       round: this.round,
-      questionText: d.question.text,
-      correctValue: d.question.value,
+      questionText: question.text,
+      correctValue: question.value,
       guesses,
       winner,
       loser,
@@ -790,6 +830,196 @@ export class GameRoom {
     } else {
       this.systemChat(
         `⚔️ ${winner} wins the duel! ${loser} loses $${-loserDelta}`
+      );
+    }
+    for (const name of eliminated) {
+      this.systemChat(`💸 ${name} is broke and out of the game`);
+    }
+    this.duel = null;
+
+    this.setTimer(() => {
+      if (this.alivePlayers().length <= 1) {
+        this.gameOver();
+      } else {
+        this.spin();
+      }
+    }, REVEAL_MS);
+  }
+
+  // ------------------------------------------------------------ code duel
+
+  private sendToPlayer(username: string, msg: object) {
+    for (const [ws, name] of this.sockets) {
+      if (name === username) this.send(ws, msg);
+    }
+  }
+
+  private startCodeDuel(players: [string, string]) {
+    this.round += 1;
+    this.turn = null;
+    const code = Array.from(
+      { length: CODE_LENGTH },
+      () => CODE_SYMBOLS[Math.floor(Math.random() * CODE_SYMBOLS.length)]
+    );
+    this.duel = {
+      kind: "code",
+      players,
+      code,
+      guesses: new Map(),
+      attempts: new Map(players.map((p) => [p, []])),
+    };
+    this.phase = "duel";
+    this.broadcast({
+      type: "code_duel_start",
+      round: this.round,
+      players,
+      symbols: CODE_SYMBOLS,
+      codeLength: CODE_LENGTH,
+      maxAttempts: CODE_MAX_ATTEMPTS,
+      answerTimeMs: CODE_DUEL_TIME_MS,
+    });
+    this.systemChat(
+      `🧩 Code duel! ${players[0]} vs ${players[1]} — crack the code first`
+    );
+    this.setTimer(() => this.resolveCodeDuel(), CODE_DUEL_TIME_MS);
+  }
+
+  /** standard mastermind feedback: exact = right symbol+place,
+   *  partial = right symbol wrong place */
+  private codeFeedback(code: string[], guess: string[]) {
+    let exact = 0;
+    const codeRest: string[] = [];
+    const guessRest: string[] = [];
+    for (let i = 0; i < code.length; i++) {
+      if (guess[i] === code[i]) exact++;
+      else {
+        codeRest.push(code[i]);
+        guessRest.push(guess[i]);
+      }
+    }
+    let partial = 0;
+    for (const g of guessRest) {
+      const idx = codeRest.indexOf(g);
+      if (idx !== -1) {
+        partial++;
+        codeRest.splice(idx, 1);
+      }
+    }
+    return { exact, partial };
+  }
+
+  private submitCode(username: string, guess: string[]) {
+    const d = this.duel;
+    if (this.phase !== "duel" || !d || d.kind !== "code") return;
+    if (!d.players.includes(username) || !d.code || !d.attempts) return;
+    const mine = d.attempts.get(username)!;
+    if (mine.length >= CODE_MAX_ATTEMPTS) return;
+    if (
+      guess.length !== CODE_LENGTH ||
+      guess.some((s) => !CODE_SYMBOLS.includes(s))
+    )
+      return;
+
+    const { exact, partial } = this.codeFeedback(d.code, guess);
+    mine.push({ guess, exact, partial });
+    // the guesser sees their own symbols; everyone else only sees numbers
+    this.sendToPlayer(username, {
+      type: "code_feedback",
+      guess,
+      exact,
+      partial,
+      attempt: mine.length,
+      attemptsLeft: CODE_MAX_ATTEMPTS - mine.length,
+    });
+    this.broadcast({
+      type: "code_progress",
+      username,
+      attempt: mine.length,
+      exact,
+      partial,
+    });
+
+    if (exact === CODE_LENGTH) {
+      this.resolveCodeDuel(username);
+      return;
+    }
+    const everyoneDone = d.players.every(
+      (p) => (d.attempts!.get(p)?.length ?? 0) >= CODE_MAX_ATTEMPTS
+    );
+    if (everyoneDone) this.resolveCodeDuel();
+  }
+
+  private resolveCodeDuel(cracker?: string) {
+    const d = this.duel;
+    if (this.phase !== "duel" || !d || d.kind !== "code" || !d.code) return;
+    this.clearTimers();
+
+    let winner: string | null = cracker ?? null;
+    let tie = false;
+    if (!winner) {
+      // nobody cracked it — best attempt (most exact, then most partial) wins
+      const best = d.players.map((p) => {
+        const attempts = d.attempts?.get(p) ?? [];
+        return attempts.reduce(
+          (acc, a) =>
+            a.exact > acc.exact ||
+            (a.exact === acc.exact && a.partial > acc.partial)
+              ? a
+              : acc,
+          { exact: -1, partial: -1 }
+        );
+      });
+      const [a, b] = best;
+      if (a.exact === b.exact && a.partial === b.partial) tie = true;
+      else
+        winner =
+          a.exact > b.exact || (a.exact === b.exact && a.partial > b.partial)
+            ? d.players[0]
+            : d.players[1];
+    }
+    const loser = tie
+      ? null
+      : d.players.find((p) => p !== winner) ?? null;
+
+    let loserDelta = 0;
+    if (loser) {
+      const player = this.players.get(loser);
+      if (player) {
+        loserDelta = -Math.min(DUEL_LOSER_COST, player.money);
+        player.money += loserDelta;
+      }
+    }
+
+    const eliminated: string[] = [];
+    for (const p of this.players.values()) {
+      if (p.alive && p.money <= 0) {
+        p.money = 0;
+        p.alive = false;
+        eliminated.push(p.username);
+      }
+    }
+
+    this.phase = "reveal";
+    this.broadcast({
+      type: "code_duel_result",
+      round: this.round,
+      code: d.code,
+      winner,
+      loser,
+      tie,
+      cracked: Boolean(cracker),
+      attempts: Object.fromEntries(
+        d.players.map((p) => [p, d.attempts?.get(p)?.length ?? 0])
+      ),
+      loserDelta,
+      eliminated,
+      players: this.publicPlayers(),
+    });
+    if (tie) {
+      this.systemChat(`🧩 The code duel is a tie — nobody loses money`);
+    } else {
+      this.systemChat(
+        `🧩 ${winner} wins the code duel! ${loser} loses $${-loserDelta}`
       );
     }
     for (const name of eliminated) {
