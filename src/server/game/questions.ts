@@ -20,11 +20,13 @@ function normalize(raw: any, fallbackId: string): GameQuestion | null {
     .filter((o: any): o is string => typeof o === "string" && o.length > 0);
   const answer = typeof raw.answer === "string" ? raw.answer : null;
   if (options.length < 2 || !answer || !options.includes(answer)) return null;
+  const difficulty = Number(raw.difficulty);
   return {
     id: String(raw.question_id ?? fallbackId),
     text: raw.question_text,
     options,
     answer,
+    difficulty: difficulty >= 1 && difficulty <= 3 ? Math.round(difficulty) : 1,
   };
 }
 
@@ -71,4 +73,34 @@ export function shuffle<T>(items: T[]): T[] {
     [arr[i], arr[j]] = [arr[j], arr[i]];
   }
   return arr;
+}
+
+/**
+ * Serves questions in escalating difficulty: the deeper the chain, the higher
+ * the requested tier. Falls back to easier tiers when a tier runs dry, and
+ * reshuffles used questions when everything has been asked.
+ */
+export class QuestionDeck {
+  private fresh: GameQuestion[];
+  private used: GameQuestion[] = [];
+
+  constructor(questions: GameQuestion[]) {
+    this.fresh = shuffle(questions);
+  }
+
+  draw(targetDifficulty: number): GameQuestion {
+    if (this.fresh.length === 0) {
+      this.fresh = shuffle(this.used);
+      this.used = [];
+    }
+    const want = Math.min(3, Math.max(1, targetDifficulty));
+    // prefer the wanted tier, then the closest easier one, then anything
+    const pick =
+      this.fresh.find((q) => q.difficulty === want) ??
+      this.fresh.find((q) => q.difficulty === want - 1) ??
+      this.fresh[0];
+    this.fresh = this.fresh.filter((q) => q !== pick);
+    this.used.push(pick);
+    return pick;
+  }
 }

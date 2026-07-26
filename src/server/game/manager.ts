@@ -32,7 +32,7 @@ async function persistResults(room: GameRoom) {
       id: "",
       player: p.username,
       role: p.isHost ? "Admin" : "Member",
-      points: p.points,
+      points: p.money,
     }));
     await docClient.send(
       new UpdateCommand({

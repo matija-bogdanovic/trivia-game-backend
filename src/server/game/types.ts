@@ -1,20 +1,34 @@
 export type GamePhase =
   | "lobby"
   | "countdown"
+  | "spin"
   | "question"
+  | "betting"
   | "reveal"
+  | "picking"
   | "gameover";
+
+export type BetChoice = "correct" | "wrong";
+
+export interface PlacedBet {
+  bet: BetChoice;
+  amount: number;
+}
+
+export interface BetResult {
+  username: string;
+  bet: BetChoice;
+  amount: number;
+  won: boolean;
+  moneyDelta: number;
+}
 
 export interface GamePlayer {
   username: string;
-  points: number;
+  money: number;
   alive: boolean;
   connected: boolean;
   isHost: boolean;
-  /** answer given in the current round, null = not answered yet */
-  answer: string | null;
-  /** ms elapsed between round start and the answer */
-  answeredInMs: number | null;
 }
 
 export interface GameQuestion {
@@ -22,13 +36,6 @@ export interface GameQuestion {
   text: string;
   options: string[];
   answer: string;
-}
-
-export interface RoundResultEntry {
-  username: string;
-  answer: string | null;
-  correct: boolean;
-  timeMs: number | null;
-  pointsDelta: number;
-  eliminated: boolean;
+  /** 1 = easy … 3 = hard; untagged questions default to 1 */
+  difficulty: number;
 }

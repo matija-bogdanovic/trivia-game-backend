@@ -49,8 +49,27 @@ server.on("upgrade", (request, socket, head) => {
 });
 
 wss.on("connection", (ws, request) => {
+  // heartbeat: a client that misses two pings gets terminated, which fires
+  // its 'close' handler and frees the game from waiting on a dead socket
+  (ws as any).isAlive = true;
+  ws.on("pong", () => {
+    (ws as any).isAlive = true;
+  });
   handleGameConnection(ws, request.url ?? "");
 });
+
+const HEARTBEAT_INTERVAL_MS = 30000;
+const heartbeat = setInterval(() => {
+  for (const ws of wss.clients) {
+    if ((ws as any).isAlive === false) {
+      ws.terminate();
+      continue;
+    }
+    (ws as any).isAlive = false;
+    ws.ping();
+  }
+}, HEARTBEAT_INTERVAL_MS);
+wss.on("close", () => clearInterval(heartbeat));
 
 const allowedOrigins = [
   "http://localhost:3000",

@@ -1,29 +1,57 @@
 import { WebSocket } from "ws";
 import {
+  BetResult,
   GamePhase,
   GamePlayer,
   GameQuestion,
-  RoundResultEntry,
+  PlacedBet,
 } from "./types.js";
-import { loadQuestions, shuffle } from "./questions.js";
+import { loadQuestions, QuestionDeck } from "./questions.js";
 
 export const MIN_PLAYERS = 2;
 const COUNTDOWN_SECONDS = 3;
-const QUESTION_TIME_MS = 15000;
-const REVEAL_MS = 6000;
+const SPIN_TIME_MS = 3500;
+const BASE_QUESTION_TIME_MS = 15000;
+const MIN_QUESTION_TIME_MS = 8000;
+const BETTING_TIME_MS = 4500;
+const REVEAL_MS = 5000;
+const PICK_TIME_MS = 15000;
 const EMPTY_ROOM_GRACE_MS = 60000;
-const STARTING_POINTS = 500;
-const CORRECT_BASE_POINTS = 100;
-const SPEED_BONUS_MAX = 100;
-const WRONG_PENALTY = 100;
+const STARTING_MONEY = 500;
+const WRONG_ANSWER_COST = 100;
+const MIN_BET = 10;
+const CHAT_HISTORY_LIMIT = 50;
+const CHAT_MAX_LENGTH = 300;
+const CHAT_MIN_INTERVAL_MS = 500;
+
+export interface ChatEntry {
+  /** null for system messages */
+  username: string | null;
+  text: string;
+  at: number;
+}
+
+interface Turn {
+  answering: string;
+  question: GameQuestion;
+  askedAt: number;
+  answerTimeMs: number;
+  /** hidden until the reveal */
+  answer: string | null;
+  answeredInMs: number | null;
+  bets: Map<string, PlacedBet>;
+}
 
 /**
- * One live game room ("ruski rulet" rules):
- * every alive player answers the same question at the same time, against the
- * clock. Wrong or missing answer = eliminated. If a round would eliminate
- * everyone, nobody is eliminated. If everyone answers correctly, the slowest
- * player is eliminated — being right isn't enough, you have to be fast.
- * Rounds repeat until one player remains.
+ * "Ruski rulet" rules, turn-based:
+ * a spin picks who answers first. Answer correctly and you pick the next
+ * player to impose a question on — the chain continues, with questions
+ * getting harder and the clock shorter the deeper it goes. Answer wrong
+ * (or run out of time) and you lose $100, then the wheel spins again.
+ * Everyone starts with $500; hit $0 and you're out. While a player answers,
+ * the others may bet money on whether they'll get it right — from the moment
+ * the question appears until the short "place your bets" pause closes.
+ * Last player with money wins.
  */
 export class GameRoom {
   readonly code: number;
@@ -34,13 +62,14 @@ export class GameRoom {
   players = new Map<string, GamePlayer>();
   private sockets = new Map<WebSocket, string>();
 
-  private questions: GameQuestion[] = [];
-  private questionPos = 0;
-  private currentQuestion: GameQuestion | null = null;
+  private deck: QuestionDeck | null = null;
+  private turn: Turn | null = null;
   private round = 0;
-  private roundStartedAt = 0;
+  private chainDepth = 0;
   private timers = new Set<NodeJS.Timeout>();
   private emptyTimer: NodeJS.Timeout | null = null;
+  private chat: ChatEntry[] = [];
+  private lastChatAt = new Map<string, number>();
 
   /** called once when a game finishes, for persistence */
   onGameOver?: (room: GameRoom) => void;
@@ -56,18 +85,16 @@ export class GameRoom {
 
   addPlayer(
     username: string,
-    opts: { points?: number; isHost?: boolean } = {}
+    opts: { money?: number; isHost?: boolean } = {}
   ): GamePlayer {
     const existing = this.players.get(username);
     if (existing) return existing;
     const player: GamePlayer = {
       username,
-      points: opts.points ?? STARTING_POINTS,
+      money: opts.money ?? STARTING_MONEY,
       alive: this.phase === "lobby",
       connected: false,
       isHost: opts.isHost ?? false,
-      answer: null,
-      answeredInMs: null,
     };
     this.players.set(username, player);
     return player;
@@ -78,6 +105,9 @@ export class GameRoom {
       clearTimeout(this.emptyTimer);
       this.emptyTimer = null;
     }
+    const known = this.players.get(username);
+    const isReconnect = known !== undefined && !known.connected;
+    const isNew = known === undefined;
     const player = this.addPlayer(username);
     player.connected = true;
     this.sockets.set(ws, username);
@@ -85,9 +115,16 @@ export class GameRoom {
       this.reassignHost();
     }
     this.broadcastLobbyState();
-    // late joiner mid-game still gets the current question so they can watch
-    if (this.phase === "question" && this.currentQuestion) {
-      this.send(ws, this.roundStartMessage());
+    // catch the new socket up on the conversation so far
+    this.send(ws, { type: "chat_history", messages: this.chat });
+    if (isNew) this.systemChat(`${username} joined the room`);
+    else if (isReconnect) this.systemChat(`${username} reconnected`);
+    // rejoining mid-turn: resend the current question so they see the board
+    if (
+      (this.phase === "question" || this.phase === "betting") &&
+      this.turn
+    ) {
+      this.send(ws, this.turnQuestionMessage());
     }
   }
 
@@ -102,6 +139,9 @@ export class GameRoom {
         if (this.phase === "lobby") {
           this.players.delete(username);
           if (player.isHost) this.reassignHost();
+          this.systemChat(`${username} left the room`);
+        } else {
+          this.systemChat(`${username} lost connection`);
         }
       }
       this.broadcastLobbyState();
@@ -119,15 +159,24 @@ export class GameRoom {
     if (!player) return;
     this.players.delete(username);
     if (player.isHost) this.reassignHost();
+    this.systemChat(`${username} left the room`);
+    this.turn?.bets.delete(username);
 
     if (this.phase !== "lobby" && this.phase !== "gameover") {
-      const alive = this.alivePlayers();
-      if (alive.length <= 1) {
+      if (this.alivePlayers().length <= 1) {
         this.gameOver();
         return;
       }
-      if (this.phase === "question" && this.everyAliveAnswered()) {
-        this.endRound();
+      // the player everyone was watching left — restart the chain
+      if (
+        this.turn?.answering === username &&
+        (this.phase === "question" ||
+          this.phase === "betting" ||
+          this.phase === "picking")
+      ) {
+        this.clearTimers();
+        this.broadcastLobbyState();
+        this.spin();
         return;
       }
     }
@@ -143,10 +192,6 @@ export class GameRoom {
 
   private alivePlayers(): GamePlayer[] {
     return [...this.players.values()].filter((p) => p.alive);
-  }
-
-  private everyAliveAnswered(): boolean {
-    return this.alivePlayers().every((p) => p.answer !== null);
   }
 
   // ---------------------------------------------------------------- messaging
@@ -165,7 +210,7 @@ export class GameRoom {
   private publicPlayers() {
     return [...this.players.values()].map((p) => ({
       username: p.username,
-      points: p.points,
+      money: p.money,
       alive: p.alive,
       connected: p.connected,
       isHost: p.isHost,
@@ -184,18 +229,17 @@ export class GameRoom {
     });
   }
 
-  private roundStartMessage() {
-    const q = this.currentQuestion!;
+  private turnQuestionMessage() {
+    const t = this.turn!;
     return {
-      type: "round_start",
+      type: "turn_question",
       round: this.round,
-      questionText: q.text,
-      options: q.options,
-      answerTimeMs: Math.max(
-        0,
-        this.roundStartedAt + QUESTION_TIME_MS - Date.now()
-      ),
-      aliveCount: this.alivePlayers().length,
+      chainDepth: this.chainDepth,
+      answering: t.answering,
+      questionText: t.question.text,
+      options: t.question.options,
+      difficulty: t.question.difficulty,
+      answerTimeMs: Math.max(0, t.askedAt + t.answerTimeMs - Date.now()),
     };
   }
 
@@ -209,14 +253,47 @@ export class GameRoom {
       case "submit_answer":
         this.submitAnswer(username, String(msg.answer ?? ""));
         break;
+      case "place_bet":
+        this.placeBet(username, msg.bet, Number(msg.amount));
+        break;
+      case "pick_player":
+        this.pickNext(username, String(msg.target ?? ""));
+        break;
+      case "chat":
+        this.receiveChat(username, String(msg.text ?? ""));
+        break;
       case "play_again":
-        this.playAgain(username);
+        this.playAgainRequest(username);
         break;
       case "leave":
         this.sockets.delete(ws);
         this.removePlayer(username);
         break;
     }
+  }
+
+  // ---------------------------------------------------------------- chat
+
+  private pushChat(entry: ChatEntry) {
+    this.chat.push(entry);
+    if (this.chat.length > CHAT_HISTORY_LIMIT) {
+      this.chat.splice(0, this.chat.length - CHAT_HISTORY_LIMIT);
+    }
+    this.broadcast({ type: "chat_message", ...entry });
+  }
+
+  private systemChat(text: string) {
+    this.pushChat({ username: null, text, at: Date.now() });
+  }
+
+  private receiveChat(username: string, rawText: string) {
+    const text = rawText.trim().slice(0, CHAT_MAX_LENGTH);
+    if (!text) return;
+    const now = Date.now();
+    const last = this.lastChatAt.get(username) ?? 0;
+    if (now - last < CHAT_MIN_INTERVAL_MS) return; // basic flood control
+    this.lastChatAt.set(username, now);
+    this.pushChat({ username, text, at: now });
   }
 
   // ---------------------------------------------------------------- game flow
@@ -253,8 +330,7 @@ export class GameRoom {
       this.broadcast({ type: "error", message: "No questions available." });
       return;
     }
-    this.questions = shuffle(questions);
-    this.questionPos = 0;
+    this.deck = new QuestionDeck(questions);
 
     // only players present at the start participate
     for (const p of [...this.players.values()]) {
@@ -262,9 +338,7 @@ export class GameRoom {
     }
     for (const p of this.players.values()) {
       p.alive = true;
-      p.points = STARTING_POINTS;
-      p.answer = null;
-      p.answeredInMs = null;
+      p.money = STARTING_MONEY;
     }
 
     this.round = 0;
@@ -278,121 +352,249 @@ export class GameRoom {
       if (remaining >= 0) {
         this.setTimer(tick, 1000);
       } else {
-        this.startRound();
+        this.spin();
       }
     };
     tick();
   }
 
-  private nextQuestion(): GameQuestion {
-    if (this.questionPos >= this.questions.length) {
-      this.questions = shuffle(this.questions);
-      this.questionPos = 0;
+  /** the roulette: pick who has to answer, then ask */
+  private spin() {
+    if (this.phase === "gameover") return;
+    const alive = this.alivePlayers();
+    if (alive.length <= 1) {
+      this.gameOver();
+      return;
     }
-    return this.questions[this.questionPos++];
+    this.chainDepth = 0;
+    const target = alive[Math.floor(Math.random() * alive.length)];
+    this.phase = "spin";
+    this.broadcast({
+      type: "spin",
+      target: target.username,
+      spinTimeMs: SPIN_TIME_MS,
+    });
+    this.setTimer(() => this.askQuestion(target.username), SPIN_TIME_MS);
   }
 
-  private startRound() {
-    if (this.phase === "gameover") return;
-    this.round += 1;
-    this.currentQuestion = this.nextQuestion();
-    for (const p of this.players.values()) {
-      p.answer = null;
-      p.answeredInMs = null;
+  private askQuestion(answering: string) {
+    if (this.phase === "gameover" || !this.deck) return;
+    const player = this.players.get(answering);
+    if (!player || !player.alive) {
+      this.spin();
+      return;
     }
+    this.round += 1;
+    // deeper chain -> harder tier, shorter clock
+    const difficulty = 1 + Math.floor(this.chainDepth / 2);
+    const answerTimeMs = Math.max(
+      MIN_QUESTION_TIME_MS,
+      BASE_QUESTION_TIME_MS - this.chainDepth * 1000
+    );
+    this.turn = {
+      answering,
+      question: this.deck.draw(difficulty),
+      askedAt: Date.now(),
+      answerTimeMs,
+      answer: null,
+      answeredInMs: null,
+      bets: new Map(),
+    };
     this.phase = "question";
-    this.roundStartedAt = Date.now();
-    this.broadcast(this.roundStartMessage());
-    this.setTimer(() => this.endRound(), QUESTION_TIME_MS);
+    this.broadcast(this.turnQuestionMessage());
+    this.setTimer(() => this.resolveTurn(), answerTimeMs);
   }
 
   private submitAnswer(username: string, answer: string) {
-    if (this.phase !== "question") return;
-    const player = this.players.get(username);
-    if (!player || !player.alive || player.answer !== null) return;
+    const t = this.turn;
+    if (this.phase !== "question" || !t) return;
+    if (username !== t.answering || t.answer !== null) return;
 
-    player.answer = answer;
-    player.answeredInMs = Date.now() - this.roundStartedAt;
+    t.answer = answer;
+    t.answeredInMs = Date.now() - t.askedAt;
+    this.clearTimers();
 
-    const alive = this.alivePlayers();
-    this.broadcast({
-      type: "player_answered",
-      username,
-      answeredCount: alive.filter((p) => p.answer !== null).length,
-      aliveCount: alive.length,
-    });
-
-    if (this.everyAliveAnswered()) this.endRound();
+    // answer stays hidden: last call for bets
+    const canBet = this.bettors().filter((p) => !t.bets.has(p.username));
+    if (canBet.length > 0) {
+      this.phase = "betting";
+      this.broadcast({
+        type: "bet_start",
+        target: t.answering,
+        betTimeMs: BETTING_TIME_MS,
+      });
+      this.setTimer(() => this.resolveTurn(), BETTING_TIME_MS);
+    } else {
+      this.resolveTurn();
+    }
   }
 
-  private endRound() {
-    if (this.phase !== "question" || !this.currentQuestion) return;
-    this.clearTimers();
-    const question = this.currentQuestion;
-    const alive = this.alivePlayers();
+  /** everyone alive with money, except whoever is answering */
+  private bettors(): GamePlayer[] {
+    const t = this.turn;
+    if (!t) return [];
+    return this.alivePlayers().filter(
+      (p) => p.username !== t.answering && p.money >= MIN_BET
+    );
+  }
 
-    const results: RoundResultEntry[] = alive.map((p) => {
-      const correct = p.answer === question.answer;
-      const timeMs = p.answeredInMs;
-      let pointsDelta: number;
-      if (correct) {
-        const speedBonus = Math.round(
-          SPEED_BONUS_MAX * (1 - (timeMs ?? QUESTION_TIME_MS) / QUESTION_TIME_MS)
-        );
-        pointsDelta = CORRECT_BASE_POINTS + Math.max(0, speedBonus);
-      } else {
-        pointsDelta = -WRONG_PENALTY;
-      }
-      return {
-        username: p.username,
-        answer: p.answer,
-        correct,
-        timeMs,
-        pointsDelta,
-        eliminated: false,
-      };
+  private placeBet(username: string, rawBet: unknown, rawAmount: number) {
+    const t = this.turn;
+    if ((this.phase !== "question" && this.phase !== "betting") || !t) return;
+    if (rawBet !== "correct" && rawBet !== "wrong") return;
+    if (username === t.answering || t.bets.has(username)) return;
+    const player = this.players.get(username);
+    if (!player || !player.alive) return;
+
+    const amount = Math.min(
+      player.money,
+      Math.max(MIN_BET, Math.floor(rawAmount) || 0)
+    );
+    if (amount < MIN_BET || player.money < MIN_BET) return;
+
+    t.bets.set(username, { bet: rawBet, amount });
+    this.broadcast({
+      type: "player_bet",
+      username,
+      betCount: t.bets.size,
+      eligibleCount: this.bettors().length + t.bets.size,
     });
+    // in the final betting pause, close early once every bettor is in
+    if (this.phase === "betting" && this.bettors().every((p) => t.bets.has(p.username))) {
+      this.clearTimers();
+      this.resolveTurn();
+    }
+  }
 
-    const wrong = results.filter((r) => !r.correct);
-    let everyoneSpared = false;
+  private resolveTurn() {
+    const t = this.turn;
+    if (
+      (this.phase !== "question" && this.phase !== "betting") ||
+      !t
+    )
+      return;
+    this.clearTimers();
 
-    if (wrong.length === results.length) {
-      // everyone failed — russian roulette clicks on an empty chamber
-      everyoneSpared = true;
-    } else if (wrong.length === 0) {
-      // everyone was right — the slowest player is eliminated
-      const slowest = [...results].sort(
-        (a, b) => (b.timeMs ?? Infinity) - (a.timeMs ?? Infinity)
-      )[0];
-      if (results.length > 1) slowest.eliminated = true;
-    } else {
-      for (const r of wrong) r.eliminated = true;
+    const answering = this.players.get(t.answering);
+    const timedOut = t.answer === null;
+    const correct = !timedOut && t.answer === t.question.answer;
+
+    let answererDelta = 0;
+    if (!correct && answering) {
+      answererDelta = -Math.min(WRONG_ANSWER_COST, answering.money);
+      answering.money += answererDelta;
     }
 
-    for (const r of results) {
-      const p = this.players.get(r.username);
-      if (!p) continue;
-      p.points += r.pointsDelta;
-      if (r.eliminated) p.alive = false;
+    const betResults: BetResult[] = [];
+    for (const [bettor, placed] of t.bets) {
+      const player = this.players.get(bettor);
+      if (!player) continue;
+      const won = (placed.bet === "correct") === correct;
+      const stake = Math.min(placed.amount, player.money);
+      const moneyDelta = won ? stake : -stake;
+      player.money += moneyDelta;
+      betResults.push({
+        username: bettor,
+        bet: placed.bet,
+        amount: stake,
+        won,
+        moneyDelta,
+      });
+    }
+
+    // broke players are out
+    const eliminated: string[] = [];
+    for (const p of this.players.values()) {
+      if (p.alive && p.money <= 0) {
+        p.money = 0;
+        p.alive = false;
+        eliminated.push(p.username);
+      }
     }
 
     this.phase = "reveal";
     this.broadcast({
       type: "round_result",
       round: this.round,
-      correctAnswer: question.answer,
-      everyoneSpared,
-      results,
+      chainDepth: this.chainDepth,
+      answering: t.answering,
+      answer: t.answer,
+      timedOut,
+      correct,
+      correctAnswer: t.question.answer,
+      answererDelta,
+      bets: betResults,
+      eliminated,
       players: this.publicPlayers(),
     });
 
-    this.setTimer(() => {
-      if (this.alivePlayers().length <= 1) {
-        this.gameOver();
-      } else {
-        this.startRound();
+    if (correct) {
+      this.systemChat(`${t.answering} answered correctly`);
+    } else {
+      this.systemChat(
+        `${t.answering} ${timedOut ? "ran out of time" : "answered wrong"} and loses $${-answererDelta}`
+      );
+    }
+    for (const name of eliminated) {
+      this.systemChat(`💸 ${name} is broke and out of the game`);
+    }
+
+    this.setTimer(() => this.afterReveal(correct), REVEAL_MS);
+  }
+
+  private afterReveal(wasCorrect: boolean) {
+    const t = this.turn;
+    if (this.phase !== "reveal" || !t) return;
+
+    if (this.alivePlayers().length <= 1) {
+      this.gameOver();
+      return;
+    }
+
+    const answerer = this.players.get(t.answering);
+    if (wasCorrect && answerer?.alive) {
+      const choices = this.alivePlayers()
+        .filter((p) => p.username !== t.answering)
+        .map((p) => p.username);
+      if (choices.length === 1) {
+        // no real choice to make
+        this.pickNext(t.answering, choices[0], true);
+        return;
       }
-    }, REVEAL_MS);
+      this.phase = "picking";
+      this.broadcast({
+        type: "pick_start",
+        picker: t.answering,
+        choices,
+        pickTimeMs: PICK_TIME_MS,
+      });
+      this.setTimer(() => {
+        const random = choices[Math.floor(Math.random() * choices.length)];
+        this.pickNext(t.answering, random, true);
+      }, PICK_TIME_MS);
+    } else {
+      this.spin();
+    }
+  }
+
+  private pickNext(username: string, target: string, forced = false) {
+    const t = this.turn;
+    if (!t) return;
+    if (!forced && this.phase !== "picking") return;
+    if (username !== t.answering) return;
+    const targetPlayer = this.players.get(target);
+    if (!targetPlayer || !targetPlayer.alive || target === username) return;
+
+    this.clearTimers();
+    this.chainDepth += 1;
+    this.broadcast({
+      type: "picked",
+      picker: username,
+      target,
+      chainDepth: this.chainDepth,
+    });
+    this.systemChat(`${username} imposes the next question on ${target}`);
+    this.askQuestion(target);
   }
 
   private gameOver() {
@@ -400,7 +602,7 @@ export class GameRoom {
     this.phase = "gameover";
     const standings = this.publicPlayers().sort((a, b) => {
       if (a.alive !== b.alive) return a.alive ? -1 : 1;
-      return b.points - a.points;
+      return b.money - a.money;
     });
     const winner = standings[0]?.username ?? null;
     this.broadcast({
@@ -409,10 +611,11 @@ export class GameRoom {
       rounds: this.round,
       standings,
     });
+    if (winner) this.systemChat(`🏆 ${winner} wins the game!`);
     this.onGameOver?.(this);
   }
 
-  private playAgain(byUsername: string) {
+  playAgainRequest(byUsername: string) {
     if (this.phase !== "gameover") return;
     if (!this.players.get(byUsername)) return;
     for (const p of [...this.players.values()]) {
@@ -421,12 +624,12 @@ export class GameRoom {
         continue;
       }
       p.alive = true;
-      p.points = STARTING_POINTS;
-      p.answer = null;
-      p.answeredInMs = null;
+      p.money = STARTING_MONEY;
     }
     this.reassignHost();
     this.round = 0;
+    this.chainDepth = 0;
+    this.turn = null;
     this.phase = "lobby";
     this.broadcastLobbyState();
   }
