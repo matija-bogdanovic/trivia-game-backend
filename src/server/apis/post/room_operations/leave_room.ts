@@ -35,23 +35,20 @@ export default async function leaveRoom(req: Request, res: Response): Promise<an
     }
 
     const isAdmin = leavingPlayer.role === "Admin";
-    if (isAdmin && room.players.length > 1) {
-      return res.status(400).json({
-        message: "Admin can't leave unless everyone else leaves the room.",
-      });
-    }
-
-    // Step 3: Filter out the leaving player
     const updatedPlayers = room.players.filter(p => p.player !== username);
 
-    // Step 4: Update the room's players list in DynamoDB
+    // if the admin leaves, the next player inherits the room
+    if (isAdmin && updatedPlayers.length > 0) {
+      updatedPlayers[0] = { ...updatedPlayers[0], role: "Admin" };
+    }
+
     await docClient.send(
       new UpdateCommand({
         TableName: "Lobbies",
         Key: { lobby_id: String(room.lobby_id) },
         UpdateExpression: "SET players = :updatedPlayers",
         ExpressionAttributeValues: {
-          ":players": updatedPlayers,
+          ":updatedPlayers": updatedPlayers,
         },
       })
     );
