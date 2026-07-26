@@ -2,6 +2,11 @@ import { Request, Response } from "express";
 import { docClient } from "../../../app.js";
 import { PutCommand } from "@aws-sdk/lib-dynamodb";
 import uuid4 from "uuid4";
+import {
+  getWallet,
+  msUntilNextCredit,
+  spendLobbyCredit,
+} from "../../../game/wallet.js";
 
 export default async function createRoom(
   req: Request,
@@ -15,6 +20,17 @@ export default async function createRoom(
     const { playerId, createdBy, roomName } = req.body;
     if (!createdBy || !roomName) {
       return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    // creating a lobby costs a credit — the anti-spam throttle
+    const wallet = await spendLobbyCredit(String(createdBy));
+    if (!wallet) {
+      const current = await getWallet(String(createdBy));
+      return res.status(403).json({
+        error: "Not enough credits",
+        credits: current.credits,
+        nextCreditInMs: msUntilNextCredit(current),
+      });
     }
     await docClient.send(
       new PutCommand({
@@ -64,7 +80,11 @@ export default async function createRoom(
       })
     );
 
-    res.json({ message: "Room created", roomCode: roomCode });
+    res.json({
+      message: "Room created",
+      roomCode: roomCode,
+      creditsLeft: wallet.credits,
+    });
   } catch (error) {
     console.error("Error creating room:", error);
     res.status(500).json({ error: "Failed to create room" });

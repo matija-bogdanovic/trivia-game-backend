@@ -3,8 +3,18 @@ import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { docClient } from "../app.js";
 import { queryByKey } from "../helpers/query_db.js";
 import { GameRoom } from "./room.js";
+import { recordGameResult } from "./wallet.js";
 
 const rooms = new Map<number, GameRoom>();
+
+export function getLiveRoomSummaries() {
+  return [...rooms.values()].map((room) => ({
+    code: room.code,
+    phase: room.phase,
+    connectedCount: [...room.players.values()].filter((p) => p.connected)
+      .length,
+  }));
+}
 
 async function getOrCreateRoom(code: number): Promise<GameRoom | null> {
   const existing = rooms.get(code);
@@ -26,6 +36,18 @@ async function getOrCreateRoom(code: number): Promise<GameRoom | null> {
 }
 
 async function persistResults(room: GameRoom) {
+  // lifetime stats + coin rewards, regardless of lobby persistence
+  const players = [...room.players.values()];
+  const winner =
+    [...players].sort((a, b) => {
+      if (a.alive !== b.alive) return a.alive ? -1 : 1;
+      return b.money - a.money;
+    })[0]?.username ?? null;
+  recordGameResult(
+    players.map((p) => p.username),
+    winner
+  ).catch((err) => console.error("recordGameResult failed:", err));
+
   if (!room.lobbyId) return;
   try {
     const players = [...room.players.values()].map((p) => ({
@@ -85,7 +107,11 @@ export function handleGameConnection(ws: WebSocket, url: string) {
           ws.close();
           return;
         }
-        room.connect(ws, username);
+        const avatar =
+          typeof msg.avatar === "string" && msg.avatar.length <= 24
+            ? msg.avatar
+            : null;
+        room.connect(ws, username, avatar);
       } else if (room) {
         room.handleMessage(ws, msg);
       }

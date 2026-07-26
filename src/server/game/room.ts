@@ -85,12 +85,13 @@ export class GameRoom {
 
   addPlayer(
     username: string,
-    opts: { money?: number; isHost?: boolean } = {}
+    opts: { money?: number; isHost?: boolean; avatar?: string | null } = {}
   ): GamePlayer {
     const existing = this.players.get(username);
     if (existing) return existing;
     const player: GamePlayer = {
       username,
+      avatar: opts.avatar ?? null,
       money: opts.money ?? STARTING_MONEY,
       alive: this.phase === "lobby",
       connected: false,
@@ -100,7 +101,7 @@ export class GameRoom {
     return player;
   }
 
-  connect(ws: WebSocket, username: string) {
+  connect(ws: WebSocket, username: string, avatar: string | null = null) {
     if (this.emptyTimer) {
       clearTimeout(this.emptyTimer);
       this.emptyTimer = null;
@@ -108,8 +109,9 @@ export class GameRoom {
     const known = this.players.get(username);
     const isReconnect = known !== undefined && !known.connected;
     const isNew = known === undefined;
-    const player = this.addPlayer(username);
+    const player = this.addPlayer(username, { avatar });
     player.connected = true;
+    if (avatar) player.avatar = avatar;
     this.sockets.set(ws, username);
     if (![...this.players.values()].some((p) => p.isHost && p.connected)) {
       this.reassignHost();
@@ -210,6 +212,7 @@ export class GameRoom {
   private publicPlayers() {
     return [...this.players.values()].map((p) => ({
       username: p.username,
+      avatar: p.avatar,
       money: p.money,
       alive: p.alive,
       connected: p.connected,

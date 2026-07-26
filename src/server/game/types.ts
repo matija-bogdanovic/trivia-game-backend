@@ -25,6 +25,8 @@ export interface BetResult {
 
 export interface GamePlayer {
   username: string;
+  /** chosen profile picture ("e|🦊|200" = emoji+hue), null = initials */
+  avatar: string | null;
   money: number;
   alive: boolean;
   connected: boolean;

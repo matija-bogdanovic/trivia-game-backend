@@ -12,6 +12,12 @@ import getRoomCode from "./post/room_operations/get_room_code.js";
 import submitAnswer from "./post/room_operations/check_answer.js";
 import getActiveRooms from "./get/get_lobby_count.js";
 import getRandomQuestions from "./post/room_operations/retrieve_questions.js";
+import {
+  lobbiesHandler,
+  leaderboardHandler,
+  shopBuyHandler,
+  walletHandler,
+} from "./economy.js";
 
 const router = Router();
 
@@ -29,5 +35,9 @@ router.post("/getquestion", getRandomQuestions)
 
 router.get("/getusernames", getUsernames);
 router.get("/getActiveRooms", getActiveRooms);
+router.get("/lobbies", lobbiesHandler);
+router.get("/leaderboard", leaderboardHandler);
+router.post("/wallet", walletHandler);
+router.post("/shop/buy", shopBuyHandler);
 
 export default router;

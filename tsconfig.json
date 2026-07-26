@@ -11,5 +11,7 @@
     "resolveJsonModule": true,
     "allowJs": true
   },
-  "lib": ["es2015"]
+  "lib": ["es2015"],
+  "include": ["src/**/*"],
+  "exclude": ["scripts", "node_modules", "build"]
 }
