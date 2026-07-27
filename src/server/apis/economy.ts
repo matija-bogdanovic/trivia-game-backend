@@ -67,45 +67,52 @@ export async function shopBuyHandler(req: Request, res: Response): Promise<any> 
   }
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+const FRESH_LOBBY_MS = 60 * 60 * 1000;
+
+/**
+ * The single definition of an "active" lobby, shared by the homepage list
+ * and the active-rooms counter: joinable (waiting/countdown) AND either
+ * someone is connected right now or it was created within the last hour.
+ */
+export async function listActiveLobbies() {
+  const scan = await docClient.send(
+    new ScanCommand({
+      TableName: "Lobbies",
+      ProjectionExpression: "code, roomName, players, createdAt, #st",
+      ExpressionAttributeNames: { "#st": "state" },
+    })
+  );
+  const live = getLiveRoomSummaries();
+  return (scan.Items ?? [])
+    .filter((l: any) => l.state !== "finished")
+    .map((l: any) => {
+      const liveRoom = live.find((r) => r.code === Number(l.code));
+      return {
+        code: Number(l.code),
+        roomName: l.roomName ?? `Room ${l.code}`,
+        playerCount: liveRoom ? liveRoom.connectedCount : 0,
+        phase: liveRoom ? liveRoom.phase : "lobby",
+        isLive: Boolean(liveRoom),
+        createdAt: l.createdAt ?? null,
+      };
+    })
+    .filter((l) => {
+      if (l.phase !== "lobby" && l.phase !== "countdown") return false;
+      if (l.isLive && l.playerCount > 0) return true;
+      const age = Date.now() - new Date(l.createdAt ?? 0).getTime();
+      return age < FRESH_LOBBY_MS;
+    })
+    .sort(
+      (a, b) =>
+        new Date(b.createdAt ?? 0).getTime() -
+        new Date(a.createdAt ?? 0).getTime()
+    )
+    .slice(0, 20);
+}
 
 export async function lobbiesHandler(_req: Request, res: Response): Promise<any> {
   try {
-    const scan = await docClient.send(
-      new ScanCommand({
-        TableName: "Lobbies",
-        ProjectionExpression:
-          "code, roomName, players, createdAt, #st",
-        ExpressionAttributeNames: { "#st": "state" },
-      })
-    );
-    const live = getLiveRoomSummaries();
-    const lobbies = (scan.Items ?? [])
-      .filter((l: any) => {
-        if (l.state === "finished") return false;
-        const age = Date.now() - new Date(l.createdAt ?? 0).getTime();
-        return age < DAY_MS; // hide stale rooms
-      })
-      .map((l: any) => {
-        const liveRoom = live.find((r) => r.code === Number(l.code));
-        return {
-          code: Number(l.code),
-          roomName: l.roomName ?? `Room ${l.code}`,
-          playerCount: liveRoom
-            ? liveRoom.connectedCount
-            : (l.players ?? []).length,
-          phase: liveRoom ? liveRoom.phase : "lobby",
-          createdAt: l.createdAt ?? null,
-        };
-      })
-      .filter((l) => l.phase === "lobby" || l.phase === "countdown")
-      .sort(
-        (a, b) =>
-          new Date(b.createdAt ?? 0).getTime() -
-          new Date(a.createdAt ?? 0).getTime()
-      )
-      .slice(0, 20);
-    return res.json({ lobbies });
+    return res.json({ lobbies: await listActiveLobbies() });
   } catch (err) {
     console.error("lobbies error:", err);
     return res.status(500).json({ message: "Internal server error" });
