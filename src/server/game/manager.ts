@@ -108,7 +108,7 @@ async function persistResults(room: GameRoom) {
       for (const p of players) {
         try {
           const wallet = await getWallet(p.username);
-          room.setPlayerStreak(p.username, wallet.currentStreak);
+          room.setPlayerProfile(p.username, wallet.currentStreak, wallet.avatar);
         } catch {
           // cosmetic only
         }
@@ -183,7 +183,9 @@ export function handleGameConnection(ws: WebSocket, url: string) {
         // hydrate the lobby streak badge (cosmetic, so best-effort)
         const joinedRoom = room;
         getWallet(username)
-          .then((w) => joinedRoom.setPlayerStreak(username, w.currentStreak))
+          .then((w) =>
+            joinedRoom.setPlayerProfile(username, w.currentStreak, w.avatar)
+          )
           .catch(() => {});
       } else if (room) {
         room.handleMessage(ws, msg);

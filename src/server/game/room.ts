@@ -268,12 +268,15 @@ export class GameRoom {
     }));
   }
 
-  /** lifetime win streak shown on lobby player cards */
-  setPlayerStreak(username: string, streak: number) {
+  /** lobby-card metadata that lives in the wallet (streak, avatar) */
+  setPlayerProfile(username: string, streak: number, avatar: string | null) {
     const player = this.players.get(username);
-    if (!player || player.streak === streak) return;
+    if (!player) return;
+    const changed =
+      player.streak !== streak || (avatar !== null && player.avatar !== avatar);
     player.streak = streak;
-    this.broadcastLobbyState();
+    if (avatar !== null) player.avatar = avatar;
+    if (changed) this.broadcastLobbyState();
   }
 
   announce(text: string) {

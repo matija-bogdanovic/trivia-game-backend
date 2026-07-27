@@ -25,6 +25,7 @@ export async function walletHandler(req: Request, res: Response): Promise<any> {
     return res.json({
       credits: wallet.credits,
       coins: wallet.coins,
+      avatar: wallet.avatar,
       ownedAvatars: wallet.ownedAvatars,
       wins: wallet.wins,
       gamesPlayed: wallet.gamesPlayed,

@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import pkg from "aws-sdk";
+import { getWallet, saveWallet } from "../game/wallet.js";
 
 const { S3 } = pkg;
 const s3 = new S3({ region: "eu-west-3" });
@@ -32,7 +33,14 @@ export async function uploadAvatarHandler(
         ContentType: `image/${match[1]}`,
       })
       .promise();
-    return res.json({ version: Date.now() });
+    // the wallet is the source of truth for the avatar pointer — no
+    // Cognito attribute write needed (federated tokens can't do those
+    // without extra scopes)
+    const avatar = `u|${Date.now()}`;
+    const wallet = await getWallet(username);
+    wallet.avatar = avatar;
+    await saveWallet(wallet);
+    return res.json({ avatar });
   } catch (err) {
     console.error("avatar upload error:", err);
     return res.status(500).json({ message: "Internal server error" });
