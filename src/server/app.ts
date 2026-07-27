@@ -85,7 +85,8 @@ app.use(
 );
 
 app.use(cookieParser());
-app.use(express.json());
+// avatar uploads arrive as ~256x256 JPEG data URLs, larger than the 100kb default
+app.use(express.json({ limit: "1mb" }));
 app.use(
   session({
     secret: process.env.SESSION_SECRET || "change-me",

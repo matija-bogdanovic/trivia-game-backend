@@ -13,6 +13,10 @@ import submitAnswer from "./post/room_operations/check_answer.js";
 import getActiveRooms from "./get/get_lobby_count.js";
 import getRandomQuestions from "./post/room_operations/retrieve_questions.js";
 import {
+  getAvatarImageHandler,
+  uploadAvatarHandler,
+} from "./avatars.js";
+import {
   friendActionHandler,
   friendsListHandler,
   lobbiesHandler,
@@ -43,5 +47,7 @@ router.post("/wallet", walletHandler);
 router.post("/shop/buy", shopBuyHandler);
 router.post("/friends/list", friendsListHandler);
 router.post("/friends/action", friendActionHandler);
+router.post("/avatar", uploadAvatarHandler);
+router.get("/avatar/img/:username", getAvatarImageHandler);
 
 export default router;

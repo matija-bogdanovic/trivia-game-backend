@@ -64,14 +64,9 @@ export interface ShopItem {
   value: string;
 }
 
+// real photo uploads replaced the emoji avatars, so the shop sells credits
 export const SHOP_ITEMS: ShopItem[] = [
   { id: "credits3", name: "3 lobby credits", cost: 100, kind: "credits", value: "3" },
-  { id: "av_dragon", name: "Dragon avatar", cost: 150, kind: "avatar", value: "🐉" },
-  { id: "av_crown", name: "Crown avatar", cost: 150, kind: "avatar", value: "👑" },
-  { id: "av_unicorn", name: "Unicorn avatar", cost: 150, kind: "avatar", value: "🦄" },
-  { id: "av_diamond", name: "Diamond avatar", cost: 150, kind: "avatar", value: "💎" },
-  { id: "av_alien", name: "Alien avatar", cost: 200, kind: "avatar", value: "👽" },
-  { id: "av_fire", name: "Fire avatar", cost: 200, kind: "avatar", value: "🔥" },
 ];
 
 function freshWallet(username: string): Wallet {
