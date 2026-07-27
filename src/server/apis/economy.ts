@@ -10,18 +10,27 @@ import {
   getWalletIfExists,
   msUntilNextCredit,
   removeFriend,
+  saveWallet,
   sendFriendRequest,
   SHOP_ITEMS,
 } from "../game/wallet.js";
 import { getLiveRoomSummaries, isUserOnline } from "../game/manager.js";
 
 export async function walletHandler(req: Request, res: Response): Promise<any> {
-  const { username } = req.body;
+  const { username, displayName } = req.body;
   if (!username || typeof username !== "string") {
     return res.status(400).json({ message: "username required" });
   }
   try {
     const wallet = await getWallet(username);
+    if (
+      typeof displayName === "string" &&
+      displayName.trim() &&
+      wallet.displayName !== displayName.trim().slice(0, 50)
+    ) {
+      wallet.displayName = displayName.trim().slice(0, 50);
+      await saveWallet(wallet);
+    }
     return res.json({
       credits: wallet.credits,
       coins: wallet.coins,
@@ -134,6 +143,7 @@ export async function friendsListHandler(
         const w = await getWalletIfExists(name);
         return {
           username: name,
+          displayName: w?.displayName ?? name,
           online: isUserOnline(name),
           points: w?.points ?? 0,
           currentStreak: w?.currentStreak ?? 0,
@@ -203,6 +213,7 @@ export async function leaderboardHandler(_req: Request, res: Response): Promise<
     const top = (scan.Items ?? [])
       .map((w: any) => ({
         username: w.username,
+        displayName: w.displayName ?? w.username,
         wins: w.wins ?? 0,
         gamesPlayed: w.gamesPlayed ?? 0,
         coins: w.coins ?? 0,

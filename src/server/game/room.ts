@@ -41,6 +41,8 @@ const CHAT_MIN_INTERVAL_MS = 500;
 export interface ChatEntry {
   /** null for system messages */
   username: string | null;
+  /** frozen at write time so history survives players leaving */
+  displayName?: string | null;
   text: string;
   at: number;
 }
@@ -123,12 +125,18 @@ export class GameRoom {
 
   addPlayer(
     username: string,
-    opts: { money?: number; isHost?: boolean; avatar?: string | null } = {}
+    opts: {
+      money?: number;
+      isHost?: boolean;
+      avatar?: string | null;
+      displayName?: string | null;
+    } = {}
   ): GamePlayer {
     const existing = this.players.get(username);
     if (existing) return existing;
     const player: GamePlayer = {
       username,
+      displayName: opts.displayName ?? username,
       avatar: opts.avatar ?? null,
       money: opts.money ?? STARTING_MONEY,
       alive: this.phase === "lobby",
@@ -140,7 +148,17 @@ export class GameRoom {
     return player;
   }
 
-  connect(ws: WebSocket, username: string, avatar: string | null = null) {
+  /** what to call a player in chat/announcements */
+  nameOf(username: string): string {
+    return this.players.get(username)?.displayName ?? username;
+  }
+
+  connect(
+    ws: WebSocket,
+    username: string,
+    avatar: string | null = null,
+    displayName: string | null = null
+  ) {
     if (this.emptyTimer) {
       clearTimeout(this.emptyTimer);
       this.emptyTimer = null;
@@ -148,9 +166,10 @@ export class GameRoom {
     const known = this.players.get(username);
     const isReconnect = known !== undefined && !known.connected;
     const isNew = known === undefined;
-    const player = this.addPlayer(username, { avatar });
+    const player = this.addPlayer(username, { avatar, displayName });
     player.connected = true;
     if (avatar) player.avatar = avatar;
+    if (displayName) player.displayName = displayName;
     this.sockets.set(ws, username);
     if (![...this.players.values()].some((p) => p.isHost && p.connected)) {
       this.reassignHost();
@@ -158,8 +177,8 @@ export class GameRoom {
     this.broadcastLobbyState();
     // catch the new socket up on the conversation so far
     this.send(ws, { type: "chat_history", messages: this.chat });
-    if (isNew) this.systemChat(`${username} joined the room`);
-    else if (isReconnect) this.systemChat(`${username} reconnected`);
+    if (isNew) this.systemChat(`${this.nameOf(username)} joined the room`);
+    else if (isReconnect) this.systemChat(`${this.nameOf(username)} reconnected`);
     // rejoining mid-turn: resend the current question so they see the board
     if (
       (this.phase === "question" || this.phase === "betting") &&
@@ -180,9 +199,9 @@ export class GameRoom {
         if (this.phase === "lobby") {
           this.players.delete(username);
           if (player.isHost) this.reassignHost();
-          this.systemChat(`${username} left the room`);
+          this.systemChat(`${player.displayName} left the room`);
         } else {
-          this.systemChat(`${username} lost connection`);
+          this.systemChat(`${player.displayName} lost connection`);
         }
       }
       this.broadcastLobbyState();
@@ -200,7 +219,7 @@ export class GameRoom {
     if (!player) return;
     this.players.delete(username);
     if (player.isHost) this.reassignHost();
-    if (!opts.silent) this.systemChat(`${username} left the room`);
+    if (!opts.silent) this.systemChat(`${player.displayName} left the room`);
     this.turn?.bets.delete(username);
 
     if (this.phase !== "lobby" && this.phase !== "gameover") {
@@ -259,6 +278,7 @@ export class GameRoom {
   private publicPlayers() {
     return [...this.players.values()].map((p) => ({
       username: p.username,
+      displayName: p.displayName,
       avatar: p.avatar,
       money: p.money,
       alive: p.alive,
@@ -400,7 +420,12 @@ export class GameRoom {
     const last = this.lastChatAt.get(username) ?? 0;
     if (now - last < CHAT_MIN_INTERVAL_MS) return; // basic flood control
     this.lastChatAt.set(username, now);
-    this.pushChat({ username, text, at: now });
+    this.pushChat({
+      username,
+      displayName: this.nameOf(username),
+      text,
+      at: now,
+    });
   }
 
   // ---------------------------------------------------------------- game flow
@@ -668,14 +693,14 @@ export class GameRoom {
     });
 
     if (correct) {
-      this.systemChat(`${t.answering} answered correctly`);
+      this.systemChat(`${this.nameOf(t.answering)} answered correctly`);
     } else {
       this.systemChat(
-        `${t.answering} ${timedOut ? "ran out of time" : "answered wrong"} and loses $${-answererDelta}`
+        `${this.nameOf(t.answering)} ${timedOut ? "ran out of time" : "answered wrong"} and loses $${-answererDelta}`
       );
     }
     for (const name of eliminated) {
-      this.systemChat(`💸 ${name} is broke and out of the game`);
+      this.systemChat(`💸 ${this.nameOf(name)} is broke and out of the game`);
     }
 
     this.setTimer(() => this.afterReveal(correct), REVEAL_MS);
@@ -732,7 +757,7 @@ export class GameRoom {
       target,
       chainDepth: this.chainDepth,
     });
-    this.systemChat(`${username} imposes the next question on ${target}`);
+    this.systemChat(`${this.nameOf(username)} imposes the next question on ${this.nameOf(target)}`);
     this.askQuestion(target);
   }
 
@@ -755,7 +780,7 @@ export class GameRoom {
       players,
       answerTimeMs: DUEL_TIME_MS,
     });
-    this.systemChat(`⚔️ Duel! ${players[0]} vs ${players[1]} — closest guess wins`);
+    this.systemChat(`⚔️ Duel! ${this.nameOf(players[0])} vs ${this.nameOf(players[1])} — closest guess wins`);
     this.setTimer(() => this.resolveDuel(), DUEL_TIME_MS);
   }
 
@@ -832,11 +857,11 @@ export class GameRoom {
       this.systemChat(`⚔️ The duel is a tie — nobody loses money`);
     } else {
       this.systemChat(
-        `⚔️ ${winner} wins the duel! ${loser} loses $${-loserDelta}`
+        `⚔️ ${this.nameOf(winner!)} wins the duel! ${this.nameOf(loser!)} loses $${-loserDelta}`
       );
     }
     for (const name of eliminated) {
-      this.systemChat(`💸 ${name} is broke and out of the game`);
+      this.systemChat(`💸 ${this.nameOf(name)} is broke and out of the game`);
     }
     this.duel = null;
 
@@ -882,7 +907,7 @@ export class GameRoom {
       answerTimeMs: CODE_DUEL_TIME_MS,
     });
     this.systemChat(
-      `🧩 Code duel! ${players[0]} vs ${players[1]} — crack the code first`
+      `🧩 Code duel! ${this.nameOf(players[0])} vs ${this.nameOf(players[1])} — crack the code first`
     );
     this.setTimer(() => this.resolveCodeDuel(), CODE_DUEL_TIME_MS);
   }
@@ -1022,11 +1047,11 @@ export class GameRoom {
       this.systemChat(`🧩 The code duel is a tie — nobody loses money`);
     } else {
       this.systemChat(
-        `🧩 ${winner} wins the code duel! ${loser} loses $${-loserDelta}`
+        `🧩 ${this.nameOf(winner!)} wins the code duel! ${this.nameOf(loser!)} loses $${-loserDelta}`
       );
     }
     for (const name of eliminated) {
-      this.systemChat(`💸 ${name} is broke and out of the game`);
+      this.systemChat(`💸 ${this.nameOf(name)} is broke and out of the game`);
     }
     this.duel = null;
 
@@ -1053,7 +1078,7 @@ export class GameRoom {
       rounds: this.round,
       standings,
     });
-    if (winner) this.systemChat(`🏆 ${winner} wins the game!`);
+    if (winner) this.systemChat(`🏆 ${this.nameOf(winner)} wins the game!`);
     this.onGameOver?.(this);
   }
 
@@ -1071,7 +1096,7 @@ export class GameRoom {
         ws.close();
       }
     }
-    this.systemChat(`${target} was removed from the lobby by the host`);
+    this.systemChat(`${this.nameOf(target)} was removed from the lobby by the host`);
     this.removePlayer(target, { silent: true });
     this.onPlayerKicked?.(this, target);
   }

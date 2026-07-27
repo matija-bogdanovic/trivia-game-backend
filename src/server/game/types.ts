@@ -31,7 +31,10 @@ export interface BetResult {
 }
 
 export interface GamePlayer {
+  /** unique account id (Cognito username) — the identity key */
   username: string;
+  /** what other players see (Google name, chosen name, ...) */
+  displayName: string;
   /** chosen profile picture ("e|🦊|200" = emoji+hue), null = initials */
   avatar: string | null;
   money: number;

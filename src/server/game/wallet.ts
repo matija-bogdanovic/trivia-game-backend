@@ -29,6 +29,8 @@ export interface Wallet {
   friendRequests: string[];
   /** profile picture pointer ("u|<version>"), null = initials */
   avatar: string | null;
+  /** what other players see; the username stays the unique key */
+  displayName: string | null;
 }
 
 /** per-player stats from one finished game, used for achievement checks */
@@ -88,6 +90,7 @@ function freshWallet(username: string): Wallet {
     friends: [],
     friendRequests: [],
     avatar: null,
+    displayName: null,
   };
 }
 
@@ -101,6 +104,7 @@ function withDefaults(wallet: Wallet): Wallet {
   wallet.friends ??= [];
   wallet.friendRequests ??= [];
   wallet.avatar ??= null;
+  wallet.displayName ??= null;
   return wallet;
 }
 

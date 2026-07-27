@@ -7,7 +7,7 @@ import {
 import { docClient } from "../app.js";
 import { queryByKey } from "../helpers/query_db.js";
 import { GameRoom } from "./room.js";
-import { getWallet, recordGameResult } from "./wallet.js";
+import { getWallet, recordGameResult, saveWallet } from "./wallet.js";
 
 const rooms = new Map<number, GameRoom>();
 
@@ -101,7 +101,7 @@ async function persistResults(room: GameRoom) {
           achievements: achievements.map((a) => ({ id: a.id, name: a.name })),
         });
         room.announce(
-          `🏅 ${username} unlocked: ${achievements.map((a) => a.name).join(", ")}`
+          `🏅 ${room.nameOf(username)} unlocked: ${achievements.map((a) => a.name).join(", ")}`
         );
       }
       // refresh lobby streak badges for the next match
@@ -179,13 +179,22 @@ export function handleGameConnection(ws: WebSocket, url: string) {
           typeof msg.avatar === "string" && msg.avatar.length <= 24
             ? msg.avatar
             : null;
-        room.connect(ws, username, avatar);
-        // hydrate the lobby streak badge (cosmetic, so best-effort)
+        const displayName =
+          typeof msg.displayName === "string" && msg.displayName.trim()
+            ? msg.displayName.trim().slice(0, 50)
+            : null;
+        room.connect(ws, username, avatar, displayName);
+        // hydrate streak badge + avatar; keep the wallet's display name
+        // fresh so leaderboard/friends show real names
         const joinedRoom = room;
         getWallet(username)
-          .then((w) =>
-            joinedRoom.setPlayerProfile(username, w.currentStreak, w.avatar)
-          )
+          .then(async (w) => {
+            joinedRoom.setPlayerProfile(username, w.currentStreak, w.avatar);
+            if (displayName && w.displayName !== displayName) {
+              w.displayName = displayName;
+              await saveWallet(w);
+            }
+          })
           .catch(() => {});
       } else if (room) {
         room.handleMessage(ws, msg);
