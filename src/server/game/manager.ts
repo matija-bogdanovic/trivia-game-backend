@@ -20,6 +20,17 @@ export function getLiveRoomSummaries() {
   }));
 }
 
+/** a live game this player dropped out of (still has their seat) */
+export function findDroppedGame(username: string) {
+  for (const room of rooms.values()) {
+    const p = room.players.get(username);
+    if (p && !p.connected && room.phase !== "gameover") {
+      return { code: room.code, roomName: room.roomName, phase: room.phase };
+    }
+  }
+  return null;
+}
+
 export function isUserOnline(username: string): boolean {
   for (const room of rooms.values()) {
     const p = room.players.get(username);

@@ -14,7 +14,22 @@ import {
   sendFriendRequest,
   SHOP_ITEMS,
 } from "../game/wallet.js";
-import { getLiveRoomSummaries, isUserOnline } from "../game/manager.js";
+import {
+  findDroppedGame,
+  getLiveRoomSummaries,
+  isUserOnline,
+} from "../game/manager.js";
+
+export async function myActiveRoomHandler(
+  req: Request,
+  res: Response
+): Promise<any> {
+  const { username } = req.body;
+  if (!username || typeof username !== "string") {
+    return res.status(400).json({ message: "username required" });
+  }
+  return res.json({ room: findDroppedGame(username) });
+}
 
 export async function walletHandler(req: Request, res: Response): Promise<any> {
   const { username, displayName } = req.body;

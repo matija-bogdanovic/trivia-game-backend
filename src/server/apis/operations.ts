@@ -21,6 +21,7 @@ import {
   friendsListHandler,
   lobbiesHandler,
   leaderboardHandler,
+  myActiveRoomHandler,
   shopBuyHandler,
   walletHandler,
 } from "./economy.js";
@@ -44,6 +45,7 @@ router.get("/getActiveRooms", getActiveRooms);
 router.get("/lobbies", lobbiesHandler);
 router.get("/leaderboard", leaderboardHandler);
 router.post("/wallet", walletHandler);
+router.post("/myActiveRoom", myActiveRoomHandler);
 router.post("/shop/buy", shopBuyHandler);
 router.post("/friends/list", friendsListHandler);
 router.post("/friends/action", friendActionHandler);
