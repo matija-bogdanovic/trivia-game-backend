@@ -83,6 +83,8 @@ export class GameRoom {
   private duel: {
     kind: "guess" | "code";
     players: [string, string];
+    /** when the duel clock runs out — for reconnect resync */
+    endsAt: number;
     // closest-guess duel
     question?: GuessQuestion;
     guesses: Map<string, number>;
@@ -92,6 +94,14 @@ export class GameRoom {
       string,
       { guess: string[]; exact: number; partial: number }[]
     >;
+  } | null = null;
+  /** in-flight spin, so a refreshing client can rejoin the animation */
+  private currentSpin: { target: string; endsAt: number } | null = null;
+  /** in-flight pick prompt, same reason */
+  private currentPick: {
+    picker: string;
+    choices: string[];
+    endsAt: number;
   } | null = null;
   private round = 0;
   private chainDepth = 0;
@@ -179,12 +189,81 @@ export class GameRoom {
     this.send(ws, { type: "chat_history", messages: this.chat });
     if (isNew) this.systemChat(`${this.nameOf(username)} joined the room`);
     else if (isReconnect) this.systemChat(`${this.nameOf(username)} reconnected`);
-    // rejoining mid-turn: resend the current question so they see the board
+    // rejoining mid-turn: resync whatever is in flight, with remaining time
+    this.resyncSocket(ws, username);
+  }
+
+  /** replay the current phase to a (re)connecting socket */
+  private resyncSocket(ws: WebSocket, username: string) {
     if (
       (this.phase === "question" || this.phase === "betting") &&
       this.turn
     ) {
       this.send(ws, this.turnQuestionMessage());
+      return;
+    }
+    if (this.phase === "spin" && this.currentSpin) {
+      this.send(ws, {
+        type: "spin",
+        target: this.currentSpin.target,
+        spinTimeMs: Math.max(200, this.currentSpin.endsAt - Date.now()),
+      });
+      return;
+    }
+    if (this.phase === "picking" && this.currentPick) {
+      this.send(ws, {
+        type: "pick_start",
+        picker: this.currentPick.picker,
+        choices: this.currentPick.choices,
+        pickTimeMs: Math.max(500, this.currentPick.endsAt - Date.now()),
+      });
+      return;
+    }
+    if (this.phase === "duel" && this.duel) {
+      const remaining = Math.max(500, this.duel.endsAt - Date.now());
+      if (this.duel.kind === "guess" && this.duel.question) {
+        this.send(ws, {
+          type: "duel_question",
+          round: this.round,
+          questionText: this.duel.question.text,
+          players: this.duel.players,
+          answerTimeMs: remaining,
+        });
+      } else if (this.duel.kind === "code" && this.duel.attempts) {
+        this.send(ws, {
+          type: "code_duel_start",
+          round: this.round,
+          players: this.duel.players,
+          symbols: CODE_SYMBOLS,
+          codeLength: CODE_LENGTH,
+          maxAttempts: CODE_MAX_ATTEMPTS,
+          answerTimeMs: remaining,
+        });
+        // replay everyone's progress; the reconnector's own attempts
+        // include the symbols so their board is fully restored
+        for (const [player, attempts] of this.duel.attempts) {
+          attempts.forEach((a, i) => {
+            if (player === username) {
+              this.send(ws, {
+                type: "code_feedback",
+                guess: a.guess,
+                exact: a.exact,
+                partial: a.partial,
+                attempt: i + 1,
+                attemptsLeft: CODE_MAX_ATTEMPTS - attempts.length,
+              });
+            } else {
+              this.send(ws, {
+                type: "code_progress",
+                username: player,
+                attempt: i + 1,
+                exact: a.exact,
+                partial: a.partial,
+              });
+            }
+          });
+        }
+      }
     }
   }
 
@@ -524,6 +603,10 @@ export class GameRoom {
     }
     this.lastSpinTarget = target.username;
     this.phase = "spin";
+    this.currentSpin = {
+      target: target.username,
+      endsAt: Date.now() + SPIN_TIME_MS,
+    };
     this.broadcast({
       type: "spin",
       target: target.username,
@@ -534,6 +617,8 @@ export class GameRoom {
 
   private askQuestion(answering: string) {
     if (this.phase === "gameover" || !this.deck) return;
+    this.currentSpin = null;
+    this.currentPick = null;
     const player = this.players.get(answering);
     if (!player || !player.alive) {
       this.spin();
@@ -726,6 +811,11 @@ export class GameRoom {
         return;
       }
       this.phase = "picking";
+      this.currentPick = {
+        picker: t.answering,
+        choices,
+        endsAt: Date.now() + PICK_TIME_MS,
+      };
       this.broadcast({
         type: "pick_start",
         picker: t.answering,
@@ -766,10 +856,12 @@ export class GameRoom {
   private startDuel(players: [string, string]) {
     this.round += 1;
     this.turn = null;
+    this.currentSpin = null;
     this.duel = {
       kind: "guess",
       question: drawGuessQuestion(),
       players,
+      endsAt: Date.now() + DUEL_TIME_MS,
       guesses: new Map(),
     };
     this.phase = "duel";
@@ -885,6 +977,7 @@ export class GameRoom {
   private startCodeDuel(players: [string, string]) {
     this.round += 1;
     this.turn = null;
+    this.currentSpin = null;
     const code = Array.from(
       { length: CODE_LENGTH },
       () => CODE_SYMBOLS[Math.floor(Math.random() * CODE_SYMBOLS.length)]
@@ -893,6 +986,7 @@ export class GameRoom {
       kind: "code",
       players,
       code,
+      endsAt: Date.now() + CODE_DUEL_TIME_MS,
       guesses: new Map(),
       attempts: new Map(players.map((p) => [p, []])),
     };
