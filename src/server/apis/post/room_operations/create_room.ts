@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { docClient } from "../../../app.js";
 import { PutCommand } from "@aws-sdk/lib-dynamodb";
 import uuid4 from "uuid4";
+import bcrypt from "bcrypt";
 import {
   getWallet,
   msUntilNextCredit,
@@ -17,10 +18,21 @@ export default async function createRoom(
 
     const roomCode = Math.floor(Math.random() * 900000) + 100000;
 
-    const { playerId, createdBy, roomName } = req.body;
+    const { playerId, createdBy, roomName, isPrivate, password } = req.body;
     if (!createdBy || !roomName) {
       return res.status(400).json({ error: "Missing required fields" });
     }
+    const roomIsPrivate = Boolean(isPrivate);
+    if (roomIsPrivate) {
+      if (typeof password !== "string" || password.length < 4) {
+        return res
+          .status(400)
+          .json({ error: "Private rooms need a password (4+ characters)" });
+      }
+    }
+    const passwordHash = roomIsPrivate
+      ? await bcrypt.hash(String(password), 10)
+      : null;
 
     // creating a lobby costs a credit — the anti-spam throttle
     const wallet = await spendLobbyCredit(String(createdBy));
@@ -32,14 +44,17 @@ export default async function createRoom(
         nextCreditInMs: msUntilNextCredit(current),
       });
     }
+    const lobbyId = uuid4();
     await docClient.send(
       new PutCommand({
         TableName: "Lobbies",
         Item: {
-          lobby_id: uuid4(),
+          lobby_id: lobbyId,
           createdAt: dateNow,
           roomName: String(roomName),
           code: Number(roomCode),
+          isPrivate: roomIsPrivate,
+          ...(passwordHash ? { passwordHash } : {}),
           players: [
             {
               id: String(playerId),
@@ -57,6 +72,7 @@ export default async function createRoom(
     res.json({
       message: "Room created",
       roomCode: roomCode,
+      lobbyId,
       creditsLeft: wallet.credits,
     });
   } catch (error) {

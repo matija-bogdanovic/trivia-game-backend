@@ -6,14 +6,18 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { docClient } from "../app.js";
 import { queryByKey } from "../helpers/query_db.js";
+import bcrypt from "bcrypt";
 import { GameRoom } from "./room.js";
 import { getWallet, recordGameResult, saveWallet } from "./wallet.js";
 
-const rooms = new Map<number, GameRoom>();
+// keyed by lobby_id (the UUID used in game URLs)
+const rooms = new Map<string, GameRoom>();
 
 export function getLiveRoomSummaries() {
   return [...rooms.values()].map((room) => ({
     code: room.code,
+    lobbyId: room.lobbyId,
+    isPrivate: room.isPrivate,
     phase: room.phase,
     connectedCount: [...room.players.values()].filter((p) => p.connected)
       .length,
@@ -25,7 +29,12 @@ export function findDroppedGame(username: string) {
   for (const room of rooms.values()) {
     const p = room.players.get(username);
     if (p && !p.connected && room.phase !== "gameover") {
-      return { code: room.code, roomName: room.roomName, phase: room.phase };
+      return {
+        code: room.code,
+        lobbyId: room.lobbyId,
+        roomName: room.roomName,
+        phase: room.phase,
+      };
     }
   }
   return null;
@@ -39,29 +48,50 @@ export function isUserOnline(username: string): boolean {
   return false;
 }
 
-async function getOrCreateRoom(code: number): Promise<GameRoom | null> {
-  const existing = rooms.get(code);
-  if (existing) return existing;
+/** accepts a lobby_id (UUID, the URL form) or a numeric room code */
+async function getOrCreateRoom(idOrCode: string): Promise<GameRoom | null> {
+  const byId = rooms.get(idOrCode);
+  if (byId) return byId;
 
-  const items = await queryByKey("Lobbies", "code", code, "code-index");
-  const lobby = items[0];
+  let lobby: any;
+  if (/^\d+$/.test(idOrCode)) {
+    const code = Number(idOrCode);
+    const existing = [...rooms.values()].find((r) => r.code === code);
+    if (existing) return existing;
+    const items = await queryByKey("Lobbies", "code", code, "code-index");
+    lobby = items[0];
+  } else {
+    const res = await docClient.send(
+      new GetCommand({ TableName: "Lobbies", Key: { lobby_id: idOrCode } })
+    );
+    lobby = res.Item;
+  }
   if (!lobby) return null;
 
-  const room = new GameRoom(code, lobby.roomName ?? `Room ${code}`);
-  room.lobbyId = lobby.lobby_id;
+  const lobbyId = String(lobby.lobby_id);
+  const already = rooms.get(lobbyId);
+  if (already) return already;
+
+  const room = new GameRoom(
+    Number(lobby.code),
+    lobby.roomName ?? `Room ${lobby.code}`
+  );
+  room.lobbyId = lobbyId;
+  room.isPrivate = Boolean(lobby.isPrivate);
+  room.passwordHash = lobby.passwordHash ?? null;
   for (const p of lobby.players ?? []) {
     room.addPlayer(String(p.player), { isHost: p.role === "Admin" });
   }
-  room.onEmpty = () => rooms.delete(code);
+  room.onEmpty = () => rooms.delete(lobbyId);
   room.onGameOver = persistResults;
   room.onPlayerKicked = removeFromLobbyRecord;
   room.onTerminated = (r) => {
-    rooms.delete(r.code);
+    if (r.lobbyId) rooms.delete(r.lobbyId);
     deleteLobbyRecord(r).catch((err) =>
       console.error("Failed to delete lobby record:", err)
     );
   };
-  rooms.set(code, room);
+  rooms.set(lobbyId, room);
   return room;
 }
 
@@ -153,13 +183,13 @@ async function persistResults(room: GameRoom) {
 }
 
 export function handleGameConnection(ws: WebSocket, url: string) {
-  const match = url.match(/^\/game\/(\d+)/);
+  const match = url.match(/^\/game\/([A-Za-z0-9-]+)/);
   if (!match) {
     ws.send(JSON.stringify({ type: "error", message: "Unknown endpoint" }));
     ws.close();
     return;
   }
-  const code = Number(match[1]);
+  const idOrCode = match[1];
   let room: GameRoom | null = null;
 
   ws.on("message", async (raw) => {
@@ -178,13 +208,31 @@ export function handleGameConnection(ws: WebSocket, url: string) {
           );
           return;
         }
-        room = await getOrCreateRoom(code);
+        room = await getOrCreateRoom(idOrCode);
         if (!room) {
           ws.send(
             JSON.stringify({ type: "error", message: "Room not found" })
           );
           ws.close();
           return;
+        }
+        // private rooms: unknown players must present the password
+        // (existing members were already checked at the REST join)
+        if (room.isPrivate && !room.players.has(username)) {
+          const ok = await bcrypt.compare(
+            String(msg.password ?? ""),
+            room.passwordHash ?? ""
+          );
+          if (!ok) {
+            ws.send(
+              JSON.stringify({
+                type: "join_denied",
+                reason: msg.password ? "wrong_password" : "password_required",
+              })
+            );
+            room = null;
+            return;
+          }
         }
         const avatar =
           typeof msg.avatar === "string" && msg.avatar.length <= 24

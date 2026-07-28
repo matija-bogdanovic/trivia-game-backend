@@ -73,6 +73,9 @@ export class GameRoom {
   readonly code: number;
   readonly roomName: string;
   lobbyId: string | null = null;
+  isPrivate = false;
+  /** bcrypt hash when the room is private */
+  passwordHash: string | null = null;
 
   phase: GamePhase = "lobby";
   players = new Map<string, GamePlayer>();
@@ -426,6 +429,7 @@ export class GameRoom {
       phase: this.phase,
       roomName: this.roomName,
       code: this.code,
+      isPrivate: this.isPrivate,
       minPlayers: MIN_PLAYERS,
       round: this.round,
       players: this.publicPlayers(),

@@ -102,7 +102,8 @@ export async function listActiveLobbies() {
   const scan = await docClient.send(
     new ScanCommand({
       TableName: "Lobbies",
-      ProjectionExpression: "code, roomName, players, createdAt, #st",
+      ProjectionExpression:
+        "lobby_id, code, roomName, players, createdAt, isPrivate, #st",
       ExpressionAttributeNames: { "#st": "state" },
     })
   );
@@ -112,8 +113,10 @@ export async function listActiveLobbies() {
     .map((l: any) => {
       const liveRoom = live.find((r) => r.code === Number(l.code));
       return {
+        lobbyId: String(l.lobby_id),
         code: Number(l.code),
         roomName: l.roomName ?? `Room ${l.code}`,
+        isPrivate: Boolean(l.isPrivate),
         playerCount: liveRoom ? liveRoom.connectedCount : 0,
         phase: liveRoom ? liveRoom.phase : "lobby",
         isLive: Boolean(liveRoom),

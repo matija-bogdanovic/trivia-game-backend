@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import bcrypt from "bcrypt";
 import { docClient } from "../../../app.js";
 import { queryByKey } from "../../../helpers/query_db.js";
 
@@ -8,7 +9,7 @@ export default async function joinRoom(
   res: Response
 ): Promise<any> {
   try {
-    const { roomCode, id, username } = req.body;
+    const { roomCode, id, username, password } = req.body;
 
     if (isNaN(roomCode)) {
       return res.status(400).json({ message: "Invalid room code" });
@@ -27,10 +28,23 @@ export default async function joinRoom(
 
     const primaryKey = data.lobby_id;
     const players = data.players || [];
+    const playerExists = players.some(
+      (p: any) => p.player === String(username)
+    );
 
-    const playerExists = players.some((p: any) => p.player === String(username));
+    // members who already joined don't re-enter the password
+    if (data.isPrivate && !playerExists) {
+      if (typeof password !== "string" || password.length === 0) {
+        return res.status(401).json({ message: "password_required" });
+      }
+      const ok = await bcrypt.compare(password, data.passwordHash ?? "");
+      if (!ok) {
+        return res.status(403).json({ message: "wrong_password" });
+      }
+    }
+
     if (playerExists) {
-      return res.status(200).json(data);
+      return res.status(200).json({ lobbyId: primaryKey });
     }
     if (!id || typeof id !== "string") {
       return res.status(400).json({ message: "Invalid or missing player ID" });
@@ -55,10 +69,8 @@ export default async function joinRoom(
       ReturnValues: "ALL_NEW" as const,
     };
 
-    const updateResult = await docClient.send(new UpdateCommand(updateParams));
-    return res
-      .status(200)
-      .json({ roomPlayers: updateResult.Attributes?.players });
+    await docClient.send(new UpdateCommand(updateParams));
+    return res.status(200).json({ lobbyId: primaryKey });
   } catch (error) {
     console.error("Something went wrong:", error);
     return res.status(500).json({ message: "Server error" });
