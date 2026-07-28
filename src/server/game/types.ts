@@ -43,6 +43,8 @@ export interface GamePlayer {
   isHost: boolean;
   /** lifetime consecutive-win streak, shown in the lobby */
   streak: number;
+  /** joined mid-game: watches and chats, plays from the next match */
+  isSpectator: boolean;
 }
 
 export interface GameQuestion {

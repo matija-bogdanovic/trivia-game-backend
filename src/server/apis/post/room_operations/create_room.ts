@@ -48,33 +48,7 @@ export default async function createRoom(
               points: Number(500),
             },
           ],
-          rounds: [
-            {
-              status: "notStarted",
-              currentlyAnswering: "",
-              currentQuestionId: "",
-            },
-            {
-              status: "notStarted",
-              currentlyAnswering: "",
-              currentQuestionId: "",
-            },
-            {
-              status: "notStarted",
-              currentlyAnswering: "",
-              currentQuestionId: "",
-            },
-            {
-              status: "notStarted",
-              currentlyAnswering: "",
-              currentQuestionId: "",
-            },
-            {
-              status: "notStarted",
-              currentlyAnswering: "",
-              currentQuestionId: "",
-            },
-          ],
+          // no rounds array — games always run until one player has money
           spectators: [],
         },
       })

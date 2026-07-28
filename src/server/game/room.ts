@@ -153,6 +153,8 @@ export class GameRoom {
       connected: false,
       isHost: opts.isHost ?? false,
       streak: 0,
+      // anyone arriving while a match runs watches until the next one
+      isSpectator: this.phase !== "lobby" && this.phase !== "gameover",
     };
     this.players.set(username, player);
     return player;
@@ -187,8 +189,15 @@ export class GameRoom {
     this.broadcastLobbyState();
     // catch the new socket up on the conversation so far
     this.send(ws, { type: "chat_history", messages: this.chat });
-    if (isNew) this.systemChat(`${this.nameOf(username)} joined the room`);
-    else if (isReconnect) this.systemChat(`${this.nameOf(username)} reconnected`);
+    if (isNew) {
+      this.systemChat(
+        player.isSpectator
+          ? `👁 ${this.nameOf(username)} is watching`
+          : `${this.nameOf(username)} joined the room`
+      );
+    } else if (isReconnect) {
+      this.systemChat(`${this.nameOf(username)} reconnected`);
+    }
     // rejoining mid-turn: resync whatever is in flight, with remaining time
     this.resyncSocket(ws, username);
   }
@@ -364,6 +373,7 @@ export class GameRoom {
       connected: p.connected,
       isHost: p.isHost,
       streak: p.streak,
+      isSpectator: p.isSpectator,
     }));
   }
 
@@ -392,7 +402,9 @@ export class GameRoom {
   }
 
   getGameStats(winner: string | null) {
-    return [...this.players.values()].map((p) => {
+    return [...this.players.values()]
+      .filter((p) => !p.isSpectator)
+      .map((p) => {
       const s = this.gameStats.get(p.username) ?? {
         betsWon: 0,
         maxBetWin: 0,
@@ -550,6 +562,7 @@ export class GameRoom {
     for (const p of this.players.values()) {
       p.alive = true;
       p.money = STARTING_MONEY;
+      p.isSpectator = false;
     }
 
     this.round = 0;
@@ -1161,10 +1174,12 @@ export class GameRoom {
   private gameOver() {
     this.clearTimers();
     this.phase = "gameover";
-    const standings = this.publicPlayers().sort((a, b) => {
-      if (a.alive !== b.alive) return a.alive ? -1 : 1;
-      return b.money - a.money;
-    });
+    const standings = this.publicPlayers()
+      .filter((p) => !p.isSpectator)
+      .sort((a, b) => {
+        if (a.alive !== b.alive) return a.alive ? -1 : 1;
+        return b.money - a.money;
+      });
     const winner = standings[0]?.username ?? null;
     this.broadcast({
       type: "game_over",
@@ -1216,6 +1231,7 @@ export class GameRoom {
       }
       p.alive = true;
       p.money = STARTING_MONEY;
+      p.isSpectator = false;
     }
     this.reassignHost();
     this.round = 0;
