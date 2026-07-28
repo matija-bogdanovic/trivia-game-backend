@@ -15,6 +15,7 @@ import {
 } from "./questions.js";
 
 export const MIN_PLAYERS = 2;
+export const MAX_PLAYERS = 6;
 const COUNTDOWN_SECONDS = 3;
 const SPIN_TIME_MS = 3500;
 const BASE_QUESTION_TIME_MS = 15000;
@@ -166,6 +167,14 @@ export class GameRoom {
   /** what to call a player in chat/announcements */
   nameOf(username: string): string {
     return this.players.get(username)?.displayName ?? username;
+  }
+
+  /** no seat left for a new player (spectators don't occupy seats) */
+  isFull(): boolean {
+    return (
+      [...this.players.values()].filter((p) => !p.isSpectator).length >=
+      MAX_PLAYERS
+    );
   }
 
   connect(
@@ -431,6 +440,7 @@ export class GameRoom {
       code: this.code,
       isPrivate: this.isPrivate,
       minPlayers: MIN_PLAYERS,
+      maxPlayers: MAX_PLAYERS,
       round: this.round,
       players: this.publicPlayers(),
     });
@@ -1233,9 +1243,18 @@ export class GameRoom {
         this.players.delete(p.username);
         continue;
       }
-      p.alive = true;
-      p.money = STARTING_MONEY;
-      p.isSpectator = false;
+      if (!p.isSpectator) {
+        p.alive = true;
+        p.money = STARTING_MONEY;
+      }
+    }
+    // spectators fill free seats (max 6 players); the rest keep watching
+    for (const p of this.players.values()) {
+      if (p.isSpectator && !this.isFull()) {
+        p.isSpectator = false;
+        p.alive = true;
+        p.money = STARTING_MONEY;
+      }
     }
     this.reassignHost();
     this.round = 0;

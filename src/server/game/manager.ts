@@ -40,6 +40,12 @@ export function findDroppedGame(username: string) {
   return null;
 }
 
+/** live seat check for the REST join — memory beats the stale DB list */
+export function isLiveRoomFull(code: number): boolean | null {
+  const room = [...rooms.values()].find((r) => r.code === code);
+  return room ? room.isFull() : null;
+}
+
 export function isUserOnline(username: string): boolean {
   for (const room of rooms.values()) {
     const p = room.players.get(username);
@@ -214,6 +220,20 @@ export function handleGameConnection(ws: WebSocket, url: string) {
             JSON.stringify({ type: "error", message: "Room not found" })
           );
           ws.close();
+          return;
+        }
+        // seat cap: new arrivals while the room is in (or between)
+        // matches take a seat — deny when all 6 are taken; mid-game
+        // arrivals become spectators and are exempt
+        if (
+          room.isFull() &&
+          !room.players.has(username) &&
+          (room.phase === "lobby" || room.phase === "gameover")
+        ) {
+          ws.send(
+            JSON.stringify({ type: "join_denied", reason: "room_full" })
+          );
+          room = null;
           return;
         }
         // private rooms: unknown players must present the password

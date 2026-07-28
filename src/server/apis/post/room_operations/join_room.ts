@@ -3,6 +3,8 @@ import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import bcrypt from "bcrypt";
 import { docClient } from "../../../app.js";
 import { queryByKey } from "../../../helpers/query_db.js";
+import { MAX_PLAYERS } from "../../../game/room.js";
+import { isLiveRoomFull } from "../../../game/manager.js";
 
 export default async function joinRoom(
   req: Request,
@@ -45,6 +47,10 @@ export default async function joinRoom(
 
     if (playerExists) {
       return res.status(200).json({ lobbyId: primaryKey });
+    }
+    const liveFull = isLiveRoomFull(Number(roomCode));
+    if (liveFull ?? players.length >= MAX_PLAYERS) {
+      return res.status(409).json({ message: "room_full" });
     }
     if (!id || typeof id !== "string") {
       return res.status(400).json({ message: "Invalid or missing player ID" });
