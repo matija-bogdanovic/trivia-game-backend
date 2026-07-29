@@ -17,7 +17,7 @@ import {
 export const MIN_PLAYERS = 2;
 export const MAX_PLAYERS = 6;
 const COUNTDOWN_SECONDS = 3;
-const SPIN_TIME_MS = 3500;
+const SPIN_TIME_MS = 5000;
 const BASE_QUESTION_TIME_MS = 15000;
 const MIN_QUESTION_TIME_MS = 8000;
 const BETTING_TIME_MS = 4500;
