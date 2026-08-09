@@ -8,9 +8,10 @@ import {
   msUntilNextCredit,
   spendLobbyCredit,
 } from "../../../game/wallet.js";
+import { AuthedRequest, authedUsername } from "../../../middleware/auth.js";
 
 export default async function createRoom(
-  req: Request,
+  req: AuthedRequest,
   res: Response
 ): Promise<any> {
   try {
@@ -18,8 +19,9 @@ export default async function createRoom(
 
     const roomCode = Math.floor(Math.random() * 900000) + 100000;
 
-    const { playerId, createdBy, roomName, isPrivate, password } = req.body;
-    if (!createdBy || !roomName) {
+    const createdBy = authedUsername(req);
+    const { playerId, roomName, isPrivate, password } = req.body;
+    if (!roomName) {
       return res.status(400).json({ error: "Missing required fields" });
     }
     const roomIsPrivate = Boolean(isPrivate);
@@ -35,9 +37,9 @@ export default async function createRoom(
       : null;
 
     // creating a lobby costs a credit — the anti-spam throttle
-    const wallet = await spendLobbyCredit(String(createdBy));
+    const wallet = await spendLobbyCredit(createdBy);
     if (!wallet) {
-      const current = await getWallet(String(createdBy));
+      const current = await getWallet(createdBy);
       return res.status(403).json({
         error: "Not enough credits",
         credits: current.credits,
@@ -58,7 +60,7 @@ export default async function createRoom(
           players: [
             {
               id: String(playerId),
-              player: String(createdBy),
+              player: createdBy,
               role: "Admin",
               points: Number(500),
             },

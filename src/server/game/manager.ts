@@ -8,6 +8,8 @@ import { docClient } from "../app.js";
 import { queryByKey } from "../helpers/query_db.js";
 import bcrypt from "bcrypt";
 import { GameRoom } from "./room.js";
+import { saveMatch } from "./matches.js";
+import { identityFromToken } from "../middleware/auth.js";
 import { getWallet, recordGameResult, saveWallet } from "./wallet.js";
 
 // keyed by lobby_id (the UUID used in game URLs)
@@ -133,13 +135,18 @@ async function deleteLobbyRecord(room: GameRoom) {
 async function persistResults(room: GameRoom) {
   // lifetime stats + coin rewards, regardless of lobby persistence
   const players = [...room.players.values()];
-  const winner =
-    [...players].sort((a, b) => {
-      if (a.alive !== b.alive) return a.alive ? -1 : 1;
-      return b.money - a.money;
-    })[0]?.username ?? null;
+  // the room's own final table — spectators can't win, and this is the same
+  // ordering the game_over broadcast and the stored match agree on
+  const match = room.getMatchRecord();
+  const winner = match?.winner ?? null;
 
-  recordGameResult(room.getGameStats(winner))
+  if (match) {
+    saveMatch(match).catch((err) =>
+      console.error("Failed to store match record:", err)
+    );
+  }
+
+  recordGameResult(room.getGameStats(winner), match)
     .then(async (unlocked) => {
       for (const [username, achievements] of unlocked) {
         room.broadcast({
@@ -207,13 +214,16 @@ export function handleGameConnection(ws: WebSocket, url: string) {
     }
     try {
       if (msg.type === "join") {
-        const username = String(msg.username ?? "").trim();
-        if (!username) {
+        // identity comes from the token, never from what the client claims
+        const identity = await identityFromToken(msg.token);
+        if (!identity) {
           ws.send(
-            JSON.stringify({ type: "error", message: "Username required" })
+            JSON.stringify({ type: "join_denied", reason: "unauthenticated" })
           );
+          ws.close();
           return;
         }
+        const username = identity.username;
         room = await getOrCreateRoom(idOrCode);
         if (!room) {
           ws.send(
