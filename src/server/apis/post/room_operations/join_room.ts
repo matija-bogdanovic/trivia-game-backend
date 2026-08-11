@@ -5,13 +5,15 @@ import { docClient } from "../../../app.js";
 import { queryByKey } from "../../../helpers/query_db.js";
 import { MAX_PLAYERS } from "../../../game/room.js";
 import { isLiveRoomFull } from "../../../game/manager.js";
+import { AuthedRequest, authedUsername } from "../../../middleware/auth.js";
 
 export default async function joinRoom(
-  req: Request,
+  req: AuthedRequest,
   res: Response
 ): Promise<any> {
   try {
-    const { roomCode, id, username, password } = req.body;
+    const username = authedUsername(req);
+    const { roomCode, id, password } = req.body;
 
     if (isNaN(roomCode)) {
       return res.status(400).json({ message: "Invalid room code" });
@@ -31,7 +33,7 @@ export default async function joinRoom(
     const primaryKey = data.lobby_id;
     const players = data.players || [];
     const playerExists = players.some(
-      (p: any) => p.player === String(username)
+      (p: any) => p.player === username
     );
 
     // members who already joined don't re-enter the password
@@ -65,7 +67,7 @@ export default async function joinRoom(
         ":newPlayerList": [
           {
             id: String(id),
-            player: String(username),
+            player: username,
             points: Number(500),
             role: String("Member"),
           },

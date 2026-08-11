@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import pkg from "aws-sdk";
 import { getWallet, saveWallet } from "../game/wallet.js";
+import { AuthedRequest, authedUsername } from "../middleware/auth.js";
 
 const { S3 } = pkg;
 const s3 = new S3({ region: "eu-west-3" });
@@ -9,13 +10,12 @@ const AVATAR_BUCKET = "ipak-se-okrece-avatars";
 const MAX_DATA_URL_LENGTH = 700_000; // ~500 KB decoded
 
 export async function uploadAvatarHandler(
-  req: Request,
+  req: AuthedRequest,
   res: Response
 ): Promise<any> {
-  const { username, image } = req.body;
-  if (!username || typeof username !== "string") {
-    return res.status(400).json({ message: "username required" });
-  }
+  // you can only ever overwrite your own avatar
+  const username = authedUsername(req);
+  const { image } = req.body;
   if (typeof image !== "string" || image.length > MAX_DATA_URL_LENGTH) {
     return res.status(400).json({ message: "Image missing or too large" });
   }
@@ -25,7 +25,25 @@ export async function uploadAvatarHandler(
   }
   try {
     const body = Buffer.from(match[2], "base64");
-    await s3
+    await // The `.promise()` call might be on an JS SDK v2 client API.
+    // If yes, please remove .promise(). If not, remove this comment.
+    // The `.promise()` call might be on an JS SDK v2 client API.
+    // If yes, please remove .promise(). If not, remove this comment.
+    // The `.promise()` call might be on an JS SDK v2 client API.
+    // If yes, please remove .promise(). If not, remove this comment.
+    // The `.promise()` call might be on an JS SDK v2 client API.
+    // If yes, please remove .promise(). If not, remove this comment.
+    // The `.promise()` call might be on an JS SDK v2 client API.
+    // If yes, please remove .promise(). If not, remove this comment.
+    // The `.promise()` call might be on an JS SDK v2 client API.
+    // If yes, please remove .promise(). If not, remove this comment.
+    // The `.promise()` call might be on an JS SDK v2 client API.
+    // If yes, please remove .promise(). If not, remove this comment.
+    // The `.promise()` call might be on an JS SDK v2 client API.
+    // If yes, please remove .promise(). If not, remove this comment.
+    // The `.promise()` call might be on an JS SDK v2 client API.
+    // If yes, please remove .promise(). If not, remove this comment.
+    s3
       .putObject({
         Bucket: AVATAR_BUCKET,
         Key: `avatars/${encodeURIComponent(username)}.jpg`,
@@ -53,7 +71,25 @@ export async function getAvatarImageHandler(
 ): Promise<any> {
   const { username } = req.params;
   try {
-    const obj = await s3
+    const obj = await // The `.promise()` call might be on an JS SDK v2 client API.
+    // If yes, please remove .promise(). If not, remove this comment.
+    // The `.promise()` call might be on an JS SDK v2 client API.
+    // If yes, please remove .promise(). If not, remove this comment.
+    // The `.promise()` call might be on an JS SDK v2 client API.
+    // If yes, please remove .promise(). If not, remove this comment.
+    // The `.promise()` call might be on an JS SDK v2 client API.
+    // If yes, please remove .promise(). If not, remove this comment.
+    // The `.promise()` call might be on an JS SDK v2 client API.
+    // If yes, please remove .promise(). If not, remove this comment.
+    // The `.promise()` call might be on an JS SDK v2 client API.
+    // If yes, please remove .promise(). If not, remove this comment.
+    // The `.promise()` call might be on an JS SDK v2 client API.
+    // If yes, please remove .promise(). If not, remove this comment.
+    // The `.promise()` call might be on an JS SDK v2 client API.
+    // If yes, please remove .promise(). If not, remove this comment.
+    // The `.promise()` call might be on an JS SDK v2 client API.
+    // If yes, please remove .promise(). If not, remove this comment.
+    s3
       .getObject({
         Bucket: AVATAR_BUCKET,
         Key: `avatars/${encodeURIComponent(String(username))}.jpg`,

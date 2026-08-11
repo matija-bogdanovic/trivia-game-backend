@@ -1,15 +1,16 @@
 import { Request, Response } from "express";
 import { queryByKey } from "../../../helpers/query_db.js";
+import { AuthedRequest, authedUsername } from "../../../middleware/auth.js";
 
 export default async function getRoomCode(
-  req: Request,
+  req: AuthedRequest,
   res: Response
 ): Promise<any> {
   try {
     const items = await queryByKey(
       "Lobbies",
       "admin",
-      String(req.body.username),
+      authedUsername(req),
       "admin-index"
     );
 

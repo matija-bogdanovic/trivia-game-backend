@@ -1,4 +1,5 @@
 import { WebSocket } from "ws";
+import { randomUUID } from "node:crypto";
 import {
   BetResult,
   GamePhase,
@@ -7,6 +8,7 @@ import {
   GuessQuestion,
   PlacedBet,
 } from "./types.js";
+import { MatchRecord, MatchStanding } from "./matches.js";
 import {
   drawGuessQuestion,
   generateMathQuestion,
@@ -111,11 +113,20 @@ export class GameRoom {
   private chainDepth = 0;
   /** who the wheel picked last — their odds drop (but stay > 0) next spin */
   private lastSpinTarget: string | null = null;
-  /** per-game stats for achievement checks, keyed by username */
+  /** per-game stats for achievement checks and history, keyed by username */
   private gameStats = new Map<
     string,
-    { betsWon: number; maxBetWin: number; wrongAnswers: number }
+    {
+      betsWon: number;
+      maxBetWin: number;
+      wrongAnswers: number;
+      /** rounds this player was still in the game for */
+      roundsPlayed: number;
+    }
   >();
+  /** identifies the current match — a fresh one per start, not per lobby */
+  private matchId: string | null = null;
+  private startedAt = 0;
   private timers = new Set<NodeJS.Timeout>();
   private emptyTimer: NodeJS.Timeout | null = null;
   private chat: ChatEntry[] = [];
@@ -407,10 +418,17 @@ export class GameRoom {
   private ensureStats(username: string) {
     let s = this.gameStats.get(username);
     if (!s) {
-      s = { betsWon: 0, maxBetWin: 0, wrongAnswers: 0 };
+      s = { betsWon: 0, maxBetWin: 0, wrongAnswers: 0, roundsPlayed: 0 };
       this.gameStats.set(username, s);
     }
     return s;
+  }
+
+  /** a round just started — everyone still standing played it */
+  private creditRound() {
+    for (const p of this.players.values()) {
+      if (p.alive && !p.isSpectator) this.ensureStats(p.username).roundsPlayed += 1;
+    }
   }
 
   getGameStats(winner: string | null) {
@@ -421,6 +439,7 @@ export class GameRoom {
         betsWon: 0,
         maxBetWin: 0,
         wrongAnswers: 0,
+        roundsPlayed: 0,
       };
       return {
         username: p.username,
@@ -430,6 +449,50 @@ export class GameRoom {
         wrongAnswers: s.wrongAnswers,
       };
     });
+  }
+
+  /** final table, best first — the one ordering standings/winner agree on */
+  private finalStandings(): GamePlayer[] {
+    return [...this.players.values()]
+      .filter((p) => !p.isSpectator)
+      .sort((a, b) => {
+        if (a.alive !== b.alive) return a.alive ? -1 : 1;
+        return b.money - a.money;
+      });
+  }
+
+  /**
+   * The finished match, as it gets stored. Null before a match has run, so a
+   * room that never started writes nothing.
+   */
+  getMatchRecord(): MatchRecord | null {
+    if (!this.matchId) return null;
+    const ranked = this.finalStandings();
+    const standings: MatchStanding[] = ranked.map((p, i) => ({
+      username: p.username,
+      displayName: p.displayName,
+      avatar: p.avatar,
+      placement: i + 1,
+      money: p.money,
+      survived: p.alive,
+      roundsPlayed: this.gameStats.get(p.username)?.roundsPlayed ?? 0,
+    }));
+    const winner = ranked[0]?.username ?? null;
+    return {
+      match_id: this.matchId,
+      lobbyId: this.lobbyId,
+      roomName: this.roomName,
+      code: this.code,
+      playedAt: Date.now(),
+      durationMs: this.startedAt ? Date.now() - this.startedAt : 0,
+      rounds: this.round,
+      winner,
+      winnerName: winner ? this.nameOf(winner) : null,
+      // how far ahead the winner finished; a solo survivor beats $0
+      margin: (ranked[0]?.money ?? 0) - (ranked[1]?.money ?? 0),
+      standings,
+      participants: standings.map((s) => s.username),
+    };
   }
 
   broadcastLobbyState() {
@@ -581,6 +644,8 @@ export class GameRoom {
 
     this.round = 0;
     this.gameStats.clear();
+    this.matchId = randomUUID();
+    this.startedAt = Date.now();
     this.lastSpinTarget = null;
     this.phase = "countdown";
     this.broadcastLobbyState();
@@ -652,6 +717,7 @@ export class GameRoom {
       return;
     }
     this.round += 1;
+    this.creditRound();
     // deeper chain -> harder tier, shorter clock
     const difficulty = 1 + Math.floor(this.chainDepth / 2);
     const answerTimeMs = Math.max(
@@ -882,6 +948,7 @@ export class GameRoom {
 
   private startDuel(players: [string, string]) {
     this.round += 1;
+    this.creditRound();
     this.turn = null;
     this.currentSpin = null;
     this.duel = {
@@ -1003,6 +1070,7 @@ export class GameRoom {
 
   private startCodeDuel(players: [string, string]) {
     this.round += 1;
+    this.creditRound();
     this.turn = null;
     this.currentSpin = null;
     const code = Array.from(
@@ -1188,12 +1256,7 @@ export class GameRoom {
   private gameOver() {
     this.clearTimers();
     this.phase = "gameover";
-    const standings = this.publicPlayers()
-      .filter((p) => !p.isSpectator)
-      .sort((a, b) => {
-        if (a.alive !== b.alive) return a.alive ? -1 : 1;
-        return b.money - a.money;
-      });
+    const standings = this.finalStandings();
     const winner = standings[0]?.username ?? null;
     this.broadcast({
       type: "game_over",

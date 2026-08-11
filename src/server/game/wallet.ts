@@ -1,5 +1,6 @@
 import { GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { docClient } from "../app.js";
+import { MatchRecord } from "./matches.js";
 
 export const CREDIT_CAP = 5;
 export const CREDIT_REFILL_MS = 30 * 60 * 1000; // +1 credit every 30 min
@@ -10,6 +11,36 @@ export const POINTS_PER_WIN = 25;
 export const POINTS_STREAK_BONUS = 5; // extra per consecutive win
 export const POINTS_STREAK_BONUS_CAP = 50;
 
+/**
+ * How many matches a player carries inside their own record. A wallet item is
+ * capped at 400KB and is rewritten whole on every save, so the embedded list
+ * has to stay bounded — at ~200 bytes an entry, 20 matches costs ~4KB. Older
+ * matches aren't lost: the full record of every match lives in the Matches
+ * table, this is just the player's own recent slice.
+ */
+export const MATCH_HISTORY_LIMIT = 20;
+
+/** the slice of a finished match a player keeps in their own record */
+export interface MatchHistoryEntry {
+  matchId: string;
+  /** epoch ms the match ended */
+  playedAt: number;
+  roomName: string;
+  winner: string | null;
+  winnerName: string | null;
+  /** did this player win it */
+  won: boolean;
+  /** 1 = winner */
+  placement: number;
+  playerCount: number;
+  /** how far ahead of the runner-up the winner finished ($) */
+  margin: number;
+  /** what this player finished with */
+  money: number;
+  /** rounds this player was in the game for */
+  roundsPlayed: number;
+}
+
 export interface Wallet {
   username: string;
   credits: number;
@@ -18,6 +49,10 @@ export interface Wallet {
   ownedAvatars: string[];
   wins: number;
   gamesPlayed: number;
+  /** lifetime rounds, across every match played */
+  roundsPlayed: number;
+  /** this player's own recent matches, newest first (see MATCH_HISTORY_LIMIT) */
+  matchHistory: MatchHistoryEntry[];
   /** leaderboard points, earned per win with a streak bonus */
   points: number;
   currentStreak: number;
@@ -82,6 +117,8 @@ function freshWallet(username: string): Wallet {
     ownedAvatars: [],
     wins: 0,
     gamesPlayed: 0,
+    roundsPlayed: 0,
+    matchHistory: [],
     points: 0,
     currentStreak: 0,
     bestStreak: 0,
@@ -94,8 +131,10 @@ function freshWallet(username: string): Wallet {
   };
 }
 
-/** older wallet rows may predate the streak/achievement fields */
+/** older wallet rows may predate the streak/achievement/history fields */
 function withDefaults(wallet: Wallet): Wallet {
+  wallet.roundsPlayed ??= 0;
+  wallet.matchHistory ??= [];
   wallet.points ??= 0;
   wallet.currentStreak ??= 0;
   wallet.bestStreak ??= 0;
@@ -256,13 +295,38 @@ export async function removeFriend(
   }
 }
 
+/** the player's own view of a match, trimmed from the full record */
+function historyEntryFor(
+  match: MatchRecord,
+  username: string
+): MatchHistoryEntry | null {
+  const mine = match.standings.find((s) => s.username === username);
+  if (!mine) return null;
+  return {
+    matchId: match.match_id,
+    playedAt: match.playedAt,
+    roomName: match.roomName,
+    winner: match.winner,
+    winnerName: match.winnerName,
+    won: match.winner === username,
+    placement: mine.placement,
+    playerCount: match.standings.length,
+    margin: match.margin,
+    money: mine.money,
+    roundsPlayed: mine.roundsPlayed,
+  };
+}
+
 /**
  * Applies rewards, streaks, points, and achievement unlocks for one finished
- * game. Returns newly unlocked achievements per player so the room can
- * announce them.
+ * game, and — when the match record is passed — appends it to each player's
+ * own embedded history. It all rides on one read/save per wallet on purpose:
+ * a second pass would reload the same item and clobber this one's writes.
+ * Returns newly unlocked achievements per player so the room can announce them.
  */
 export async function recordGameResult(
-  stats: GamePlayerStats[]
+  stats: GamePlayerStats[],
+  match?: MatchRecord | null
 ): Promise<Map<string, AchievementDef[]>> {
   const unlocked = new Map<string, AchievementDef[]>();
   await Promise.all(
@@ -272,6 +336,19 @@ export async function recordGameResult(
         wallet.gamesPlayed += 1;
         wallet.coins += COINS_PER_GAME;
         wallet.betsWon += game.betsWon;
+
+        if (match) {
+          const entry = historyEntryFor(match, game.username);
+          if (entry) {
+            wallet.roundsPlayed += entry.roundsPlayed;
+            // newest first, and only ever the most recent slice
+            wallet.matchHistory = [entry, ...wallet.matchHistory].slice(
+              0,
+              MATCH_HISTORY_LIMIT
+            );
+          }
+        }
+
         if (game.wonGame) {
           wallet.wins += 1;
           wallet.coins += COINS_PER_WIN;

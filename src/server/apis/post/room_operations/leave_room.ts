@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { ScanCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { docClient } from "../../../app.js";
 import { queryByKey } from "../../../helpers/query_db.js";
+import { AuthedRequest, authedUsername } from "../../../middleware/auth.js";
 interface Player {
   id: string;
   player: string;
@@ -15,8 +16,9 @@ interface RoomDocument {
   lobby_id: string;
 }
 
-export default async function leaveRoom(req: Request, res: Response): Promise<any> {
-  const { username, code } = req.body;
+export default async function leaveRoom(req: AuthedRequest, res: Response): Promise<any> {
+  const username = authedUsername(req);
+  const { code } = req.body;
 
   try {
     console.log("Detected")

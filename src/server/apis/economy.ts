@@ -19,23 +19,22 @@ import {
   getLiveRoomSummaries,
   isUserOnline,
 } from "../game/manager.js";
+import { getMatch } from "../game/matches.js";
+import { AuthedRequest, authedUsername } from "../middleware/auth.js";
 
 export async function myActiveRoomHandler(
-  req: Request,
+  req: AuthedRequest,
   res: Response
 ): Promise<any> {
-  const { username } = req.body;
-  if (!username || typeof username !== "string") {
-    return res.status(400).json({ message: "username required" });
-  }
-  return res.json({ room: findDroppedGame(username) });
+  return res.json({ room: findDroppedGame(authedUsername(req)) });
 }
 
-export async function walletHandler(req: Request, res: Response): Promise<any> {
-  const { username, displayName } = req.body;
-  if (!username || typeof username !== "string") {
-    return res.status(400).json({ message: "username required" });
-  }
+export async function walletHandler(
+  req: AuthedRequest,
+  res: Response
+): Promise<any> {
+  const username = authedUsername(req);
+  const { displayName } = req.body;
   try {
     const wallet = await getWallet(username);
     if (
@@ -53,6 +52,8 @@ export async function walletHandler(req: Request, res: Response): Promise<any> {
       ownedAvatars: wallet.ownedAvatars,
       wins: wallet.wins,
       gamesPlayed: wallet.gamesPlayed,
+      roundsPlayed: wallet.roundsPlayed,
+      matchHistory: wallet.matchHistory,
       points: wallet.points,
       currentStreak: wallet.currentStreak,
       bestStreak: wallet.bestStreak,
@@ -70,13 +71,42 @@ export async function walletHandler(req: Request, res: Response): Promise<any> {
   }
 }
 
-export async function shopBuyHandler(req: Request, res: Response): Promise<any> {
-  const { username, itemId } = req.body;
-  if (!username || !itemId) {
-    return res.status(400).json({ message: "username and itemId required" });
+/**
+ * The full record behind one of the player's own history entries. Own matches
+ * only — you have to have been at the table to read it.
+ */
+export async function matchDetailHandler(
+  req: AuthedRequest,
+  res: Response
+): Promise<any> {
+  const username = authedUsername(req);
+  const { matchId } = req.body;
+  if (!matchId) {
+    return res.status(400).json({ message: "matchId required" });
   }
   try {
-    const result = await buyItem(String(username), String(itemId));
+    const match = await getMatch(String(matchId));
+    if (!match) return res.status(404).json({ message: "Match not found" });
+    if (!match.participants.includes(username)) {
+      return res.status(403).json({ message: "Not your match" });
+    }
+    return res.json({ match });
+  } catch (err) {
+    console.error("match detail error:", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+}
+
+export async function shopBuyHandler(
+  req: AuthedRequest,
+  res: Response
+): Promise<any> {
+  const { itemId } = req.body;
+  if (!itemId) {
+    return res.status(400).json({ message: "itemId required" });
+  }
+  try {
+    const result = await buyItem(authedUsername(req), String(itemId));
     if (typeof result === "string") {
       return res.status(400).json({ message: result });
     }
@@ -149,13 +179,11 @@ export async function lobbiesHandler(_req: Request, res: Response): Promise<any>
 // ---------------------------------------------------------------- friends
 
 export async function friendsListHandler(
-  req: Request,
+  req: AuthedRequest,
   res: Response
 ): Promise<any> {
-  const { username } = req.body;
-  if (!username) return res.status(400).json({ message: "username required" });
   try {
-    const me = await getWallet(String(username));
+    const me = await getWallet(authedUsername(req));
     const friends = await Promise.all(
       me.friends.map(async (name) => {
         const w = await getWalletIfExists(name);
@@ -182,17 +210,15 @@ export async function friendsListHandler(
 }
 
 export async function friendActionHandler(
-  req: Request,
+  req: AuthedRequest,
   res: Response
 ): Promise<any> {
-  const { username, target, action } = req.body;
-  if (!username || !target || !action) {
-    return res
-      .status(400)
-      .json({ message: "username, target and action required" });
+  const { target, action } = req.body;
+  if (!target || !action) {
+    return res.status(400).json({ message: "target and action required" });
   }
   try {
-    const me = String(username);
+    const me = authedUsername(req);
     const them = String(target);
     if (action === "request") {
       const result = await sendFriendRequest(me, them);
