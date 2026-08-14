@@ -63,15 +63,20 @@
  *             body, so a client cannot act as another player.
  *
  * ── ⚠ KNOWN BROKEN ─────────────────────────────────────────────────────────
- *   ⚠ THIS ROUTE IS BROKEN UPSTREAM AND IS PORTED AS-IS. ⚠
- *   It queries the Lobbies `admin-index` on an attribute named `admin`, but
- *   createRoom never writes an `admin` attribute — it records the owner as
- *   players[0].role === "Admin" instead. So the query matches nothing and
- *   the route answers 404 every time. No frontend code calls it.
+ *   ⚠ THIS ROUTE CANNOT WORK AND IS PORTED AS-IS. ⚠
+ *   It is broken twice over:
+ *   1. The Lobbies table has no `admin-index`. Checked against the live
+ *      table in eu-west-3: the only GSI is `code-index`. So the Query
+ *      raises ResourceNotFoundException and this route answers 500.
+ *   2. Even with that index, createRoom never writes an `admin` attribute —
+ *      it records the owner as players[0].role === "Admin" — so the query
+ *      would match nothing and the route would answer 404.
  *
- *   To actually fix it: write `admin: <username>` in createRoom.mjs's Item
- *   and backfill existing lobbies. Left broken here so the port is a port
- *   and not a silent behaviour change.
+ *   No frontend code calls it. To actually fix it: create an `admin-index`
+ *   GSI on Lobbies with `admin` as the partition key, write
+ *   `admin: <username>` in createRoom.mjs's Item, and backfill existing
+ *   lobbies. Left broken here so the port is a port and not a silent
+ *   behaviour change — consider deleting the route instead.
  *
  * Ported from: getRoomCode in src/server/apis/post/room_operations/get_room_code.ts
  * ===========================================================================

@@ -1,0 +1,55 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CloudWatchLogGroup",
+      "Effect": "Allow",
+      "Action": "logs:CreateLogGroup",
+      "Resource": "arn:aws:logs:eu-west-3:637423486388:*"
+    },
+    {
+      "Sid": "CloudWatchLogStreams",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "arn:aws:logs:eu-west-3:637423486388:log-group:/aws/lambda/*:*"
+    },
+    {
+      "Sid": "AvatarObjects",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": "arn:aws:s3:::ipak-se-okrece-avatars/avatars/*"
+    },
+    {
+      "Sid": "WalletsTable",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:Scan"
+      ],
+      "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Wallets"
+    },
+    {
+      "Sid": "LobbiesTable",
+      "Effect": "Allow",
+      "Action": ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Scan"],
+      "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Lobbies"
+    },
+    {
+      "Sid": "LobbiesIndexes",
+      "Effect": "Allow",
+      "Action": "dynamodb:Query",
+      "Resource": [
+        "arn:aws:dynamodb:eu-west-3:637423486388:table/Lobbies/index/code-index",
+        "arn:aws:dynamodb:eu-west-3:637423486388:table/Lobbies/index/admin-index"
+      ]
+    },
+    {
+      "Sid": "MatchesTable",
+      "Effect": "Allow",
+      "Action": "dynamodb:GetItem",
+      "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Matches"
+    }
+  ]
+}

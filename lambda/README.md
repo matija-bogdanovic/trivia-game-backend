@@ -55,7 +55,7 @@ falls back to the stored roster; Lambda only has the stored roster.
 | Route | Why not |
 | --- | --- |
 | `GET /getusernames` | The handler is an **empty function** — it sends no response, so the request hangs until the client times out. Nothing to port. Delete the route. |
-| `POST /getRoomCode` | Ported as `getRoomCode.mjs`, but **broken upstream**: it queries `Lobbies.admin-index` on an attribute named `admin` that `createRoom` never writes (the owner is `players[0].role === "Admin"`). It answers 404 every time. Included so the port is complete; the file explains the one-line fix. No frontend code calls it. |
+| `POST /getRoomCode` | Ported as `getRoomCode.mjs`, but **broken upstream, twice**: (1) the `Lobbies` table has no `admin-index` — checked against the live table, the only GSI is `code-index` — so the Query raises `ResourceNotFoundException` and the route answers **500**; (2) even with that index, `createRoom` never writes an `admin` attribute (the owner is `players[0].role === "Admin"`), so it would match nothing and answer 404. Included so the port is complete; the file explains the fix. No frontend code calls it — consider deleting the route. |
 | `GET /auth/login`, `GET /auth/callback`, `GET /auth/me`, `POST /auth/logout` | Dead. They implement a **server-side OIDC session flow** with `express-session` + `openid-client`, storing the user in a cookie session. The frontend does not use them — it authenticates client-side with Amplify (`fetchAuthSession`) and sends a Bearer token. Porting them would mean bundling `openid-client` *and* adding a shared session store (DynamoDB/ElastiCache) to replace in-process sessions, to rebuild something already done client-side. Recommendation: **delete them** from the Express app rather than port them. |
 | `find_room_code.ts` | Dead file — not wired to any route. |
 
@@ -73,8 +73,9 @@ Repeat per file. In the Lambda console:
    handler` with `Cannot use import statement outside a module`.)
 4. Configuration → General → **Timeout 15s, Memory 512 MB**.
 5. Configuration → Environment variables — from the file's own header block.
-6. Configuration → Permissions → click the execution role → add the inline
-   policy from the file's header block.
+6. Configuration → Permissions → Execution role → **Use an existing role** →
+   pick the one shared role from [§2a](#2a-one-shared-execution-role). Create
+   that role once, before the first function.
 7. **Add trigger → API Gateway → HTTP API → Security: Open**, then edit the
    route so the path and method match the table above exactly.
 
@@ -98,26 +99,90 @@ Repeat per file. In the Lambda console:
 refuses to save it. Every variable has a working default compiled in, so a bare
 paste runs; setting them is still correct.
 
-### IAM at a glance
+## 2a. One shared execution role
 
-Account `637423486388`, region `eu-west-3`. Each file carries its exact policy
-JSON; this is the union.
+Create **one** role and give it to all 16 functions. Do this once, before
+creating the first function.
 
-| Function | Actions | Resource |
-| --- | --- | --- |
-| wallet, shopBuy, friendsList, friendsAction | `dynamodb:GetItem`, `PutItem` | `table/Wallets` |
-| createRoom | `dynamodb:GetItem`, `PutItem` / `PutItem` | `table/Wallets` / `table/Lobbies` |
-| joinRoom, leaveRoom | `dynamodb:UpdateItem` + `Query` | `table/Lobbies` + `table/Lobbies/index/code-index` |
-| getRoomDetails | `dynamodb:Query` | `table/Lobbies/index/code-index` |
-| getRoomCode | `dynamodb:Query` | `table/Lobbies/index/admin-index` |
-| lobbies, getActiveRooms | `dynamodb:Scan` | `table/Lobbies` |
-| leaderboard | `dynamodb:Scan` | `table/Wallets` |
-| matchDetail | `dynamodb:GetItem` | `table/Matches` |
-| avatarUpload | `s3:PutObject` + `dynamodb:PutItem`, `UpdateItem` | `bucket/avatars/*` + `table/Wallets` |
-| avatarServe | `s3:GetObject` | `bucket/avatars/*` |
-| myActiveRoom | none | — |
+1. IAM → Roles → **Create role**
+2. Trusted entity type **AWS service** → Use case **Lambda** → Next
+3. Skip attaching managed policies (the inline policy below covers logging too)
+   → Next
+4. Name it `ipak-se-okrece-lambda` → Create role
+5. Open the role → Permissions → **Add permissions → Create inline policy** →
+   the **JSON** tab → paste the whole of [`iam-policy.json`](./iam-policy.json)
+   → Next → name it `ipak-se-okrece-lambda-policy` → Create policy
 
-All also need `AWSLambdaBasicExecutionRole` for CloudWatch logs.
+Then for every function: Configuration → Permissions → Edit → Execution role →
+**Use an existing role** → `ipak-se-okrece-lambda`.
+
+> If you prefer, you can instead attach the AWS-managed
+> **`AWSLambdaBasicExecutionRole`** and delete the two `CloudWatchLog*`
+> statements from the JSON — they do the same job. Attaching both is also fine,
+> just redundant. The inline policy is written to be self-sufficient so the
+> role works with nothing else attached.
+
+### What the policy grants, and why
+
+This is the exact union of what all 16 handlers call — 10 actions, no
+wildcards, every statement scoped to a specific ARN.
+
+| Statement | Actions | Resource | Used by |
+| --- | --- | --- | --- |
+| `CloudWatchLogGroup` / `CloudWatchLogStreams` | `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents` | `/aws/lambda/*` log groups | all 16 (`console.error`) |
+| `AvatarObjects` | `s3:GetObject`, `s3:PutObject` | `arn:aws:s3:::ipak-se-okrece-avatars/avatars/*` | avatarServe (Get), avatarUpload (Put) |
+| `WalletsTable` | `dynamodb:GetItem`, `PutItem`, `UpdateItem`, `Scan` | `…:table/Wallets` | wallet, shopBuy, friendsList, friendsAction, createRoom (Get/Put); avatarUpload (Put/Update); leaderboard (Scan) |
+| `LobbiesTable` | `dynamodb:PutItem`, `UpdateItem`, `Scan` | `…:table/Lobbies` | createRoom (Put); joinRoom, leaveRoom (Update); lobbies, getActiveRooms (Scan) |
+| `LobbiesIndexes` | `dynamodb:Query` | `…:table/Lobbies/index/code-index` and `…/admin-index` | getRoomDetails, joinRoom, leaveRoom (code-index); getRoomCode (admin-index) |
+| `MatchesTable` | `dynamodb:GetItem` | `…:table/Matches` | matchDetail |
+
+Deliberately **absent**:
+
+- **`s3:ListBucket`** — not needed, and leaving it out is what makes a missing
+  avatar return a clean `NoSuchKey` → 404 instead of a 403.
+- **`dynamodb:DeleteItem`** — no handler deletes anything. (The Express server's
+  policy in [`render-deployment.md`](../docs/render-deployment.md) has it; these
+  Lambdas don't need it.)
+- **`dynamodb:GetItem` on `Lobbies`** — no handler does a keyed get on a lobby;
+  they all go through `code-index`.
+- **`dynamodb:Query` on the `Lobbies` *table* ARN** — a GSI query is authorised
+  against the *index* ARN only, so the table ARN would be dead weight.
+
+`myActiveRoom` needs nothing but logs; it touches no AWS resource at all.
+
+### ⚠ Two things to keep consistent
+
+**1. Table and bucket names are env-driven.** The ARNs above are hard-coded to
+the code's defaults. If you set `WALLETS_TABLE`, `LOBBIES_TABLE`,
+`MATCHES_TABLE` or `AVATAR_BUCKET` to anything other than `Wallets`, `Lobbies`,
+`Matches`, `ipak-se-okrece-avatars`, **you must edit the matching ARN in
+`iam-policy.json`** or every call fails with `AccessDeniedException`. Simplest
+path: leave those four unset and let the defaults apply.
+
+**2. The policy is region- and account-pinned** to `eu-west-3` /
+`637423486388`. Create the functions in `eu-west-3` — the same region as the
+tables, the bucket and the Cognito pool.
+
+**Note on `admin-index`:** it is in the policy for completeness, but **that
+index does not currently exist** on the `Lobbies` table (checked against the
+live table — the only GSI is `code-index`). `getRoomCode` therefore fails with
+`ResourceNotFoundException` regardless of permissions; see the inventory above.
+Granting `Query` on an ARN that doesn't exist is harmless, and means permissions
+won't be the blocker if the index is ever created. You can drop that one ARN if
+you don't deploy `getRoomCode`.
+
+### The tradeoff
+
+One shared role means every function carries the union: `leaderboard` could
+technically write to `Lobbies`, `avatarServe` could read `Matches`. At this
+scale — one app, one account, 16 functions you wrote — that is a fine trade for
+not maintaining 16 policies. The stricter alternative is a role per function
+using the policy block printed in each file's header, which is 16 roles and 16
+policies to keep in sync. If a function is ever exposed to untrusted input in a
+new way, split that one out rather than tightening all of them.
+
+Each file still documents its own minimal permissions in its header, so
+splitting later is copy-and-paste.
 
 ### CORS — pick one, never both
 
@@ -230,7 +295,10 @@ and not a silent rewrite. Each is noted in the relevant file.
   be a contract change.
 - **`leaderboard` and `lobbies` Scan without pagination.** A Scan reads at most
   1 MB; past that the leaderboard silently considers only the first page.
-- **`getRoomCode` is broken** (see the inventory above).
+- **`getRoomCode` cannot work** — the `admin-index` it queries does not exist on
+  the `Lobbies` table, and the `admin` attribute it filters on is never written
+  (see the inventory above). This is true of the Express route too, not just
+  the port.
 - One fix *was* applied: `queryByKey` in `src/server/helpers/query_db.ts` builds
   its placeholder name out of the *value* (`code = :123`), which throws a
   `ValidationException` as soon as the value contains a `.`, `-` or space — any
