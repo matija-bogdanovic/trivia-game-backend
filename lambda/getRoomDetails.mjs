@@ -1,11 +1,8 @@
 /**
  * ===========================================================================
- * avatarServe — GET /avatar/img/{username}
+ * getRoomDetails — POST /getRoomDetails
  * ===========================================================================
- * Streams a player's stored profile picture back. Public on purpose —
- * other players' pictures are shown all over the arena, same as the Express
- * route, which sits outside requireAuth. The bucket stays private; this
- * function is its only reader.
+ * The raw lobby record for a room code. Public, as in Express.
  *
  * Paste-ready AWS Lambda handler. NO third-party dependencies: everything
  * used here either ships in the Node.js 18/20/22 Lambda runtime (AWS SDK v3)
@@ -19,7 +16,7 @@
  * └─────────────────────────────────────────────────────────────────────────┘
  *
  * ── REQUIRED ENVIRONMENT VARIABLES ─────────────────────────────────────────
- *   AVATAR_BUCKET          ipak-se-okrece-avatars
+ *   LOBBIES_TABLE          Lobbies
  *   ALLOWED_ORIGIN         https://<your-vercel-domain>,http://localhost:3000
  *   AWS_REGION             set automatically by Lambda — do NOT add it by hand
  *                          (Lambda rejects reserved env var names).
@@ -31,32 +28,17 @@
  *     "Version": "2012-10-17",
  *     "Statement": [
  *       { "Effect": "Allow",
- *         "Action": ["s3:GetObject"],
- *         "Resource": "arn:aws:s3:::ipak-se-okrece-avatars/avatars/*" }
+ *         "Action": ["dynamodb:Query"],
+ *         "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Lobbies/index/code-index" }
  *     ]
  *   }
  *   Plus AWSLambdaBasicExecutionRole for CloudWatch logs.
  *
  * ── API GATEWAY ────────────────────────────────────────────────────────────
- *   Route/Method:  GET /avatar/img/{username}
+ *   Route/Method:  POST /getRoomDetails
  *   Integration:   Lambda proxy integration (HTTP API payload 2.0, or REST
  *                  "Use Lambda Proxy integration" — this handler reads both).
- *   binaryMediaTypes: ⚠ THIS IS THE ONE ROUTE WHERE IT MATTERS.
- *                  This handler returns the image base64-encoded with
- *                  isBase64Encoded: true. What happens next depends on the
- *                  API type:
- *                  • HTTP API (payload 2.0) — decodes it to raw bytes
- *                    automatically. Nothing to configure. Recommended.
- *                  • REST API — you MUST add a binary media type or the
- *                    browser gets a base64 STRING labelled image/jpeg: a
- *                    broken image, 200 status, nothing in the logs.
- *                    API settings -> Binary media types -> add the
- *                    wildcard  * / *  (typed WITHOUT the spaces), then
- *                    redeploy the stage. Use the wildcard rather than
- *                    image/jpeg: REST APIs only decode when the CLIENT's
- *                    Accept header matches a configured type, and
- *                    browsers send 'image/avif,image/webp,* / *' for
- *                    <img> tags.
+ *   binaryMediaTypes: not needed — request and response are both JSON.
  *
  * ── CORS ───────────────────────────────────────────────────────────────────
  *   This handler emits the CORS headers itself (from ALLOWED_ORIGIN) and
@@ -68,37 +50,35 @@
  *   to an empty string here.
  *
  * ── CONTRACT (matches the Express route exactly — do not change) ───────────
- *   Request:  GET /avatar/img/{username}?v=<version>
- *   Response: 200 the image bytes
- *                  Content-Type: image/jpeg (or whatever was uploaded)
- *                  Cache-Control: public, max-age=86400, immutable
- *             404 no avatar for that user
- *   The ?v= version is the cache-buster and is intentionally ignored by the
- *   server: the pointer changing in the wallet changes the URL, and the URL
- *   changing is what defeats the year-long immutable cache.
+ *   Request:  POST /getRoomDetails   { "roomCode": 123456 }
+ *   Response: 200 <the raw Lobbies item>
+ *             400 { message: "Invalid or missing roomCode" }
+ *             404 { message: "Room not found" }
  *
  * ── NOTE ───────────────────────────────────────────────────────────────────
- *   The API Gateway path parameter MUST be named {username} — the handler
- *   reads event.pathParameters.username.
+ *   This returns the lobby item verbatim, exactly as Express does — which
+ *   includes `passwordHash` for a private room. It was already like that;
+ *   it is called out here because it is worth fixing (project the fields
+ *   you need instead of returning the whole item). Left unchanged so the
+ *   contract matches.
  *
- *   s3:ListBucket is deliberately omitted from the IAM policy above: without
- *   it, a GetObject on a key this role CAN read still returns a clean
- *   NoSuchKey (-> 404) when the object is missing, which is what this
- *   handler expects.
- *
- * Ported from: getAvatarImageHandler in src/server/apis/avatars.ts
+ * Ported from: getRoomDetails in src/server/apis/get_lobby_details.ts
  * ===========================================================================
  */
 
-import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  QueryCommand,
+} from "@aws-sdk/lib-dynamodb";
 
 // ─── config ────────────────────────────────────────────────────────────────
 const REGION = process.env.AWS_REGION || "eu-west-3";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? "http://localhost:3000";
-const AVATAR_BUCKET = process.env.AVATAR_BUCKET || "ipak-se-okrece-avatars";
+const LOBBIES_TABLE = process.env.LOBBIES_TABLE || "Lobbies";
 
 // clients at module scope so warm invocations reuse the connections
-const s3 = new S3Client({ region: REGION });
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
 
 // ─── request/response helpers (both API Gateway payload formats) ───────────
 function header(event, name) {
@@ -111,7 +91,7 @@ function header(event, name) {
 }
 
 function methodOf(event) {
-  return event.requestContext?.http?.method || event.httpMethod || "GET";
+  return event.requestContext?.http?.method || event.httpMethod || "POST";
 }
 
 /** echo back the caller's origin when it is on the allowed list */
@@ -129,6 +109,43 @@ function corsHeaders(event) {
   };
 }
 
+function json(event, statusCode, body) {
+  return {
+    statusCode,
+    headers: { "Content-Type": "application/json", ...corsHeaders(event) },
+    body: JSON.stringify(body),
+  };
+}
+
+/** parsed JSON body, or {} — Express's express.json() tolerates an empty body */
+function parseBody(event) {
+  const raw = event.isBase64Encoded
+    ? Buffer.from(event.body || "", "base64").toString("utf8")
+    : event.body || "";
+  if (!raw.trim()) return {};
+  return JSON.parse(raw);
+}
+
+/**
+ * Query a table by partition key, optionally through a secondary index.
+ * Mirrors queryByKey() in src/server/helpers/query_db.ts, with one fix: the
+ * original builds the placeholder name out of the VALUE
+ * (`${keyName} = :${keyValue}`), which throws a ValidationException as soon
+ * as the value contains a '.', '-' or a space — e.g. any username that isn't
+ * plain alphanumeric. A constant ':val' behaves identically otherwise.
+ */
+async function queryByKey(tableName, keyName, keyValue, indexName) {
+  const res = await ddb.send(
+    new QueryCommand({
+      TableName: tableName,
+      ...(indexName ? { IndexName: indexName } : {}),
+      KeyConditionExpression: `${keyName} = :val`,
+      ExpressionAttributeValues: { ":val": keyValue },
+    })
+  );
+  return res.Items ?? [];
+}
+
 // ─── handler ───────────────────────────────────────────────────────────────
 export const handler = async (event) => {
   // CORS preflight, when API Gateway is not answering it for us
@@ -136,42 +153,26 @@ export const handler = async (event) => {
     return { statusCode: 204, headers: corsHeaders(event), body: "" };
   }
 
-  const username = event.pathParameters?.username;
-  if (!username) {
-    return { statusCode: 400, headers: corsHeaders(event), body: "" };
+  let body;
+  try {
+    body = parseBody(event);
+  } catch {
+    return json(event, 400, { message: "Invalid JSON body" });
   }
 
   try {
-    // API Gateway hands the path parameter over already percent-decoded, the
-    // same as Express's req.params, so it is re-encoded here to land on the
-    // exact key avatarUpload wrote. Decoding it again first would corrupt a
-    // username containing a literal '%'.
-    const obj = await s3.send(
-      new GetObjectCommand({
-        Bucket: AVATAR_BUCKET,
-        Key: `avatars/${encodeURIComponent(username)}.jpg`,
-      })
-    );
-    const bytes = await obj.Body.transformToByteArray();
-
-    return {
-      statusCode: 200,
-      headers: {
-        "Content-Type": obj.ContentType || "image/jpeg",
-        // versioned query string does the cache-busting
-        "Cache-Control": "public, max-age=86400, immutable",
-        ...corsHeaders(event),
-      },
-      body: Buffer.from(bytes).toString("base64"),
-      isBase64Encoded: true,
-    };
-  } catch (err) {
-    // SDK v3 surfaces the missing-key case as NoSuchKey; the $metadata check
-    // covers the NotFound shape the error can otherwise take
-    if (err?.name === "NoSuchKey" || err?.$metadata?.httpStatusCode === 404) {
-      return { statusCode: 404, headers: corsHeaders(event), body: "" };
+    const { roomCode } = body;
+    if (!roomCode || isNaN(Number(roomCode))) {
+      return json(event, 400, { message: "Invalid or missing roomCode" });
     }
-    console.error("avatar fetch error:", err);
-    return { statusCode: 500, headers: corsHeaders(event), body: "" };
+
+    const items = await queryByKey(LOBBIES_TABLE, "code", Number(roomCode), "code-index");
+    if (items.length === 0) {
+      return json(event, 404, { message: "Room not found" });
+    }
+    return json(event, 200, items[0]);
+  } catch (err) {
+    console.error("Error getting room details:", err);
+    return json(event, 500, { message: "Internal server error" });
   }
 };

@@ -1,10 +1,9 @@
 /**
  * ===========================================================================
- * avatarUpload — POST /avatar
+ * leaveRoom — POST /leaveRoom
  * ===========================================================================
- * Stores the player's profile picture in S3 and stamps the wallet's avatar
- * pointer. The pointer write is what makes the new picture actually appear —
- * the frontend reads it off the wallet and appends the version as ?v=.
+ * Removes the player from a lobby's roster. If the admin leaves, the next
+ * player inherits the room.
  *
  * Paste-ready AWS Lambda handler. NO third-party dependencies: everything
  * used here either ships in the Node.js 18/20/22 Lambda runtime (AWS SDK v3)
@@ -18,8 +17,7 @@
  * └─────────────────────────────────────────────────────────────────────────┘
  *
  * ── REQUIRED ENVIRONMENT VARIABLES ─────────────────────────────────────────
- *   AVATAR_BUCKET          ipak-se-okrece-avatars
- *   WALLETS_TABLE          Wallets
+ *   LOBBIES_TABLE          Lobbies
  *   COGNITO_USER_POOL_ID   eu-west-3_Uylh5ZFUK
  *   COGNITO_CLIENT_ID      3j69q67dfk60kl92gukqhdlr91
  *   ALLOWED_ORIGIN         https://<your-vercel-domain>,http://localhost:3000
@@ -33,17 +31,17 @@
  *     "Version": "2012-10-17",
  *     "Statement": [
  *       { "Effect": "Allow",
- *         "Action": ["s3:PutObject"],
- *         "Resource": "arn:aws:s3:::ipak-se-okrece-avatars/avatars/*" },
+ *         "Action": ["dynamodb:UpdateItem"],
+ *         "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Lobbies" },
  *       { "Effect": "Allow",
- *         "Action": ["dynamodb:PutItem", "dynamodb:UpdateItem"],
- *         "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Wallets" }
+ *         "Action": ["dynamodb:Query"],
+ *         "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Lobbies/index/code-index" }
  *     ]
  *   }
  *   Plus AWSLambdaBasicExecutionRole for CloudWatch logs.
  *
  * ── API GATEWAY ────────────────────────────────────────────────────────────
- *   Route/Method:  POST /avatar
+ *   Route/Method:  POST /leaveRoom
  *   Integration:   Lambda proxy integration (HTTP API payload 2.0, or REST
  *                  "Use Lambda Proxy integration" — this handler reads both).
  *   binaryMediaTypes: not needed — request and response are both JSON.
@@ -60,49 +58,32 @@
  *   to an empty string here.
  *
  * ── CONTRACT (matches the Express route exactly — do not change) ───────────
- *   Request:  POST /avatar   { "image": "data:image/jpeg;base64,..." }
- *             jpeg | png | webp, data URL at most 700 000 chars (~500 KB)
- *   Response: 200 { avatar: "u|<epoch-ms>" }
- *             400 { message: "Image missing or too large" }
- *             400 { message: "Unsupported image format" }
- *             500 { message: "Internal server error" }
- *   Side effects: s3://ipak-se-okrece-avatars/avatars/{username}.jpg
- *                 Wallets.avatar = "u|<epoch-ms>"
+ *   Request:  POST /leaveRoom   { "code": 123456 }
+ *   Response: 200 { message: "User removed from room", player: "<username>" }
+ *             404 { message: "User not found in any room" }
  *   Auth:     Authorization: Bearer <Cognito ACCESS token>
  *             401 { message: "Authentication required" } when absent/invalid.
  *             The username comes from the verified token, NEVER from the
  *             body, so a client cannot act as another player.
  *
- * ── NOTE ───────────────────────────────────────────────────────────────────
- *   The wallet pointer is written with a targeted UpdateExpression rather
- *   than the Express getWallet/saveWallet round-trip. Same end state, but a
- *   whole-item rewrite can clobber a coins/streak write from a match
- *   finishing at the same moment. If the player has no wallet row yet the
- *   conditional update fails and the full default row is created — those
- *   defaults mirror freshWallet() in src/server/game/wallet.ts, so keep the
- *   two in sync.
- *
- * Ported from: uploadAvatarHandler in src/server/apis/avatars.ts
+ * Ported from: leaveRoom in src/server/apis/post/room_operations/leave_room.ts
  * ===========================================================================
  */
 
 import crypto from "node:crypto";
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
-  PutCommand,
+  QueryCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 
 // ─── config ────────────────────────────────────────────────────────────────
 const REGION = process.env.AWS_REGION || "eu-west-3";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? "http://localhost:3000";
-const AVATAR_BUCKET = process.env.AVATAR_BUCKET || "ipak-se-okrece-avatars";
-const WALLETS_TABLE = process.env.WALLETS_TABLE || "Wallets";
+const LOBBIES_TABLE = process.env.LOBBIES_TABLE || "Lobbies";
 
 // clients at module scope so warm invocations reuse the connections
-const s3 = new S3Client({ region: REGION });
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
 
 // ─── request/response helpers (both API Gateway payload formats) ───────────
@@ -231,65 +212,24 @@ function bearerFrom(event) {
   return token.trim() || null;
 }
 
-// uploads arrive as a browser-downscaled 256x256 JPEG data URL
-const MAX_DATA_URL_LENGTH = 700_000; // ~500 KB decoded
-const CREDIT_CAP = 5;
-
-/** mirrors freshWallet() in src/server/game/wallet.ts */
-function freshWallet(username, avatar) {
-  return {
-    username,
-    credits: CREDIT_CAP,
-    lastRefillAt: Date.now(),
-    coins: 0,
-    ownedAvatars: [],
-    wins: 0,
-    gamesPlayed: 0,
-    roundsPlayed: 0,
-    matchHistory: [],
-    points: 0,
-    currentStreak: 0,
-    bestStreak: 0,
-    betsWon: 0,
-    achievements: [],
-    friends: [],
-    friendRequests: [],
-    avatar,
-    displayName: null,
-  };
-}
-
-/** writes only the avatar attribute; creates the row if the player has none */
-async function setAvatarPointer(username, avatar) {
-  const update = (guarded) =>
-    ddb.send(
-      new UpdateCommand({
-        TableName: WALLETS_TABLE,
-        Key: { username },
-        UpdateExpression: "SET avatar = :avatar",
-        ExpressionAttributeValues: { ":avatar": avatar },
-        ...(guarded ? { ConditionExpression: "attribute_exists(username)" } : {}),
-      })
-    );
-
-  try {
-    await update(true);
-  } catch (err) {
-    if (err?.name !== "ConditionalCheckFailedException") throw err;
-    try {
-      await ddb.send(
-        new PutCommand({
-          TableName: WALLETS_TABLE,
-          Item: freshWallet(username, avatar),
-          ConditionExpression: "attribute_not_exists(username)",
-        })
-      );
-    } catch (putErr) {
-      if (putErr?.name !== "ConditionalCheckFailedException") throw putErr;
-      // lost the race against a wallet created in between — just set the field
-      await update(false);
-    }
-  }
+/**
+ * Query a table by partition key, optionally through a secondary index.
+ * Mirrors queryByKey() in src/server/helpers/query_db.ts, with one fix: the
+ * original builds the placeholder name out of the VALUE
+ * (`${keyName} = :${keyValue}`), which throws a ValidationException as soon
+ * as the value contains a '.', '-' or a space — e.g. any username that isn't
+ * plain alphanumeric. A constant ':val' behaves identically otherwise.
+ */
+async function queryByKey(tableName, keyName, keyValue, indexName) {
+  const res = await ddb.send(
+    new QueryCommand({
+      TableName: tableName,
+      ...(indexName ? { IndexName: indexName } : {}),
+      KeyConditionExpression: `${keyName} = :val`,
+      ExpressionAttributeValues: { ":val": keyValue },
+    })
+  );
+  return res.Items ?? [];
 }
 
 // ─── handler ───────────────────────────────────────────────────────────────
@@ -313,37 +253,41 @@ export const handler = async (event) => {
   }
 
   try {
-    const { image } = body;
-    if (typeof image !== "string" || image.length > MAX_DATA_URL_LENGTH) {
-      return json(event, 400, { message: "Image missing or too large" });
+    const { code } = body;
+    const scanResult = await queryByKey(LOBBIES_TABLE, "code", Number(code), "code-index");
+    if (!scanResult[0] || scanResult[0].players.length === 0) {
+      return json(event, 404, { message: "User not found in any room" });
     }
-    const match = image.match(/^data:image\/(jpeg|png|webp);base64,(.+)$/);
-    if (!match) {
-      return json(event, 400, { message: "Unsupported image format" });
+    const room = scanResult[0];
+
+    const leavingPlayer = room.players.find((p) => p.player === username);
+    if (!leavingPlayer) {
+      return json(event, 404, { message: "User not found in any room" });
     }
 
-    const bytes = Buffer.from(match[2], "base64");
-    await s3.send(
-      new PutObjectCommand({
-        Bucket: AVATAR_BUCKET,
-        // url-encoded so a username with a space or slash cannot reshape the
-        // key; the extension stays .jpg even for png/webp because the key is
-        // an identity pointer, not a filename
-        Key: `avatars/${encodeURIComponent(username)}.jpg`,
-        Body: bytes,
-        ContentType: `image/${match[1]}`,
+    const isAdmin = leavingPlayer.role === "Admin";
+    const updatedPlayers = room.players.filter((p) => p.player !== username);
+
+    // if the admin leaves, the next player inherits the room
+    if (isAdmin && updatedPlayers.length > 0) {
+      updatedPlayers[0] = { ...updatedPlayers[0], role: "Admin" };
+    }
+
+    await ddb.send(
+      new UpdateCommand({
+        TableName: LOBBIES_TABLE,
+        Key: { lobby_id: String(room.lobby_id) },
+        UpdateExpression: "SET players = :updatedPlayers",
+        ExpressionAttributeValues: { ":updatedPlayers": updatedPlayers },
       })
     );
 
-    // the wallet is the source of truth for the avatar pointer — no Cognito
-    // attribute write needed (federated tokens can't do those without extra
-    // scopes)
-    const avatar = `u|${Date.now()}`;
-    await setAvatarPointer(username, avatar);
-
-    return json(event, 200, { avatar });
+    return json(event, 200, {
+      message: "User removed from room",
+      player: username,
+    });
   } catch (err) {
-    console.error("avatar upload error:", err);
+    console.error("Error in leaveRoom:", err);
     return json(event, 500, { message: "Internal server error" });
   }
 };

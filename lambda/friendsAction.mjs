@@ -1,10 +1,8 @@
 /**
  * ===========================================================================
- * avatarUpload — POST /avatar
+ * friendsAction — POST /friends/action
  * ===========================================================================
- * Stores the player's profile picture in S3 and stamps the wallet's avatar
- * pointer. The pointer write is what makes the new picture actually appear —
- * the frontend reads it off the wallet and appends the version as ?v=.
+ * Send / accept / decline a friend request, or remove a friend.
  *
  * Paste-ready AWS Lambda handler. NO third-party dependencies: everything
  * used here either ships in the Node.js 18/20/22 Lambda runtime (AWS SDK v3)
@@ -18,7 +16,6 @@
  * └─────────────────────────────────────────────────────────────────────────┘
  *
  * ── REQUIRED ENVIRONMENT VARIABLES ─────────────────────────────────────────
- *   AVATAR_BUCKET          ipak-se-okrece-avatars
  *   WALLETS_TABLE          Wallets
  *   COGNITO_USER_POOL_ID   eu-west-3_Uylh5ZFUK
  *   COGNITO_CLIENT_ID      3j69q67dfk60kl92gukqhdlr91
@@ -33,17 +30,14 @@
  *     "Version": "2012-10-17",
  *     "Statement": [
  *       { "Effect": "Allow",
- *         "Action": ["s3:PutObject"],
- *         "Resource": "arn:aws:s3:::ipak-se-okrece-avatars/avatars/*" },
- *       { "Effect": "Allow",
- *         "Action": ["dynamodb:PutItem", "dynamodb:UpdateItem"],
+ *         "Action": ["dynamodb:GetItem", "dynamodb:PutItem"],
  *         "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Wallets" }
  *     ]
  *   }
  *   Plus AWSLambdaBasicExecutionRole for CloudWatch logs.
  *
  * ── API GATEWAY ────────────────────────────────────────────────────────────
- *   Route/Method:  POST /avatar
+ *   Route/Method:  POST /friends/action
  *   Integration:   Lambda proxy integration (HTTP API payload 2.0, or REST
  *                  "Use Lambda Proxy integration" — this handler reads both).
  *   binaryMediaTypes: not needed — request and response are both JSON.
@@ -60,49 +54,36 @@
  *   to an empty string here.
  *
  * ── CONTRACT (matches the Express route exactly — do not change) ───────────
- *   Request:  POST /avatar   { "image": "data:image/jpeg;base64,..." }
- *             jpeg | png | webp, data URL at most 700 000 chars (~500 KB)
- *   Response: 200 { avatar: "u|<epoch-ms>" }
- *             400 { message: "Image missing or too large" }
- *             400 { message: "Unsupported image format" }
- *             500 { message: "Internal server error" }
- *   Side effects: s3://ipak-se-okrece-avatars/avatars/{username}.jpg
- *                 Wallets.avatar = "u|<epoch-ms>"
+ *   Request:  POST /friends/action
+ *             { "target": "<username>",
+ *               "action": "request" | "accept" | "decline" | "remove" }
+ *   Response: 200 { status: "sent" | "accepted" | "declined" | "removed" }
+ *             400 { message: "target and action required" | "Unknown action" |
+ *                            "That's you" | "User not found" | "Already friends" |
+ *                            "Request already sent" | "No such request" }
  *   Auth:     Authorization: Bearer <Cognito ACCESS token>
  *             401 { message: "Authentication required" } when absent/invalid.
  *             The username comes from the verified token, NEVER from the
  *             body, so a client cannot act as another player.
  *
- * ── NOTE ───────────────────────────────────────────────────────────────────
- *   The wallet pointer is written with a targeted UpdateExpression rather
- *   than the Express getWallet/saveWallet round-trip. Same end state, but a
- *   whole-item rewrite can clobber a coins/streak write from a match
- *   finishing at the same moment. If the player has no wallet row yet the
- *   conditional update fails and the full default row is created — those
- *   defaults mirror freshWallet() in src/server/game/wallet.ts, so keep the
- *   two in sync.
- *
- * Ported from: uploadAvatarHandler in src/server/apis/avatars.ts
+ * Ported from: friendActionHandler in economy.ts + the friends section of game/wallet.ts
  * ===========================================================================
  */
 
 import crypto from "node:crypto";
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
+  GetCommand,
   PutCommand,
-  UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 
 // ─── config ────────────────────────────────────────────────────────────────
 const REGION = process.env.AWS_REGION || "eu-west-3";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? "http://localhost:3000";
-const AVATAR_BUCKET = process.env.AVATAR_BUCKET || "ipak-se-okrece-avatars";
 const WALLETS_TABLE = process.env.WALLETS_TABLE || "Wallets";
 
 // clients at module scope so warm invocations reuse the connections
-const s3 = new S3Client({ region: REGION });
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
 
 // ─── request/response helpers (both API Gateway payload formats) ───────────
@@ -231,12 +212,28 @@ function bearerFrom(event) {
   return token.trim() || null;
 }
 
-// uploads arrive as a browser-downscaled 256x256 JPEG data URL
-const MAX_DATA_URL_LENGTH = 700_000; // ~500 KB decoded
+// ─── wallet core (mirrors src/server/game/wallet.ts) ───────────────────────
 const CREDIT_CAP = 5;
+const CREDIT_REFILL_MS = 30 * 60 * 1000; // +1 credit every 30 min
+const LOBBY_CREATE_COST = 1;
 
-/** mirrors freshWallet() in src/server/game/wallet.ts */
-function freshWallet(username, avatar) {
+const ACHIEVEMENTS = [
+  { id: "first_win", name: "First Blood — win your first game" },
+  { id: "streak_10", name: "On Fire — win 10 games in a row" },
+  { id: "streak_50", name: "Unstoppable — win 50 games in a row" },
+  { id: "streak_100", name: "Legend — win 100 games in a row" },
+  { id: "first_bet_win", name: "Gambler — win money on a bet" },
+  { id: "bet_500", name: "High Roller — win $500+ on a single bet" },
+  { id: "flawless_win", name: "Flawless — win without a single wrong answer" },
+  { id: "games_50", name: "Veteran — play 50 games" },
+];
+
+// real photo uploads replaced the emoji avatars, so the shop sells credits
+const SHOP_ITEMS = [
+  { id: "credits3", name: "3 lobby credits", cost: 100, kind: "credits", value: "3" },
+];
+
+function freshWallet(username) {
   return {
     username,
     credits: CREDIT_CAP,
@@ -254,41 +251,117 @@ function freshWallet(username, avatar) {
     achievements: [],
     friends: [],
     friendRequests: [],
-    avatar,
+    avatar: null,
     displayName: null,
   };
 }
 
-/** writes only the avatar attribute; creates the row if the player has none */
-async function setAvatarPointer(username, avatar) {
-  const update = (guarded) =>
-    ddb.send(
-      new UpdateCommand({
-        TableName: WALLETS_TABLE,
-        Key: { username },
-        UpdateExpression: "SET avatar = :avatar",
-        ExpressionAttributeValues: { ":avatar": avatar },
-        ...(guarded ? { ConditionExpression: "attribute_exists(username)" } : {}),
-      })
-    );
+/** older wallet rows may predate the streak/achievement/history fields */
+function withDefaults(w) {
+  w.roundsPlayed ??= 0;
+  w.matchHistory ??= [];
+  w.points ??= 0;
+  w.currentStreak ??= 0;
+  w.bestStreak ??= 0;
+  w.betsWon ??= 0;
+  w.achievements ??= [];
+  w.friends ??= [];
+  w.friendRequests ??= [];
+  w.avatar ??= null;
+  w.displayName ??= null;
+  return w;
+}
 
-  try {
-    await update(true);
-  } catch (err) {
-    if (err?.name !== "ConditionalCheckFailedException") throw err;
-    try {
-      await ddb.send(
-        new PutCommand({
-          TableName: WALLETS_TABLE,
-          Item: freshWallet(username, avatar),
-          ConditionExpression: "attribute_not_exists(username)",
-        })
-      );
-    } catch (putErr) {
-      if (putErr?.name !== "ConditionalCheckFailedException") throw putErr;
-      // lost the race against a wallet created in between — just set the field
-      await update(false);
-    }
+/** applies time-based credit refill in place */
+function refill(wallet) {
+  const now = Date.now();
+  if (wallet.credits >= CREDIT_CAP) {
+    wallet.lastRefillAt = now;
+    return wallet;
+  }
+  const earned = Math.floor((now - wallet.lastRefillAt) / CREDIT_REFILL_MS);
+  if (earned > 0) {
+    wallet.credits = Math.min(CREDIT_CAP, wallet.credits + earned);
+    wallet.lastRefillAt =
+      wallet.credits >= CREDIT_CAP
+        ? now
+        : wallet.lastRefillAt + earned * CREDIT_REFILL_MS;
+  }
+  return wallet;
+}
+
+function msUntilNextCredit(wallet) {
+  if (wallet.credits >= CREDIT_CAP) return null;
+  return Math.max(0, wallet.lastRefillAt + CREDIT_REFILL_MS - Date.now());
+}
+
+async function getWallet(username) {
+  const res = await ddb.send(
+    new GetCommand({ TableName: WALLETS_TABLE, Key: { username } })
+  );
+  const wallet = withDefaults(res.Item ?? freshWallet(username));
+  refill(wallet);
+  return wallet;
+}
+
+/** like getWallet but returns null instead of inventing a row */
+async function getWalletIfExists(username) {
+  const res = await ddb.send(
+    new GetCommand({ TableName: WALLETS_TABLE, Key: { username } })
+  );
+  if (!res.Item) return null;
+  const wallet = withDefaults(res.Item);
+  refill(wallet);
+  return wallet;
+}
+
+async function saveWallet(wallet) {
+  await ddb.send(new PutCommand({ TableName: WALLETS_TABLE, Item: wallet }));
+}
+
+/** returns "accepted", or an error string */
+async function acceptFriendRequest(username, from) {
+  const me = await getWallet(username);
+  if (!me.friendRequests.includes(from)) return "No such request";
+  const other = await getWalletIfExists(from);
+  if (!other) return "User not found";
+  me.friendRequests = me.friendRequests.filter((u) => u !== from);
+  if (!me.friends.includes(from)) me.friends.push(from);
+  if (!other.friends.includes(username)) other.friends.push(username);
+  await Promise.all([saveWallet(me), saveWallet(other)]);
+  return "accepted";
+}
+
+/** returns "sent"/"accepted", or an error string */
+async function sendFriendRequest(from, to) {
+  if (from === to) return "That's you";
+  const target = await getWalletIfExists(to);
+  if (!target) return "User not found";
+  if (target.friends.includes(from)) return "Already friends";
+
+  const me = await getWallet(from);
+  // they already asked us — treat this as an accept
+  if (me.friendRequests.includes(to)) return acceptFriendRequest(from, to);
+  if (target.friendRequests.includes(from)) return "Request already sent";
+  target.friendRequests.push(from);
+  await saveWallet(target);
+  return "sent";
+}
+
+async function declineFriendRequest(username, from) {
+  const me = await getWallet(username);
+  me.friendRequests = me.friendRequests.filter((u) => u !== from);
+  await saveWallet(me);
+}
+
+async function removeFriend(username, other) {
+  const me = await getWallet(username);
+  me.friends = me.friends.filter((u) => u !== other);
+  await saveWallet(me);
+  const them = await getWalletIfExists(other);
+  if (them) {
+    them.friends = them.friends.filter((u) => u !== username);
+    await saveWallet(them);
   }
 }
 
@@ -313,37 +386,36 @@ export const handler = async (event) => {
   }
 
   try {
-    const { image } = body;
-    if (typeof image !== "string" || image.length > MAX_DATA_URL_LENGTH) {
-      return json(event, 400, { message: "Image missing or too large" });
+    const { target, action } = body;
+    if (!target || !action) {
+      return json(event, 400, { message: "target and action required" });
     }
-    const match = image.match(/^data:image\/(jpeg|png|webp);base64,(.+)$/);
-    if (!match) {
-      return json(event, 400, { message: "Unsupported image format" });
+    const me = username;
+    const them = String(target);
+
+    if (action === "request") {
+      const result = await sendFriendRequest(me, them);
+      if (result !== "sent" && result !== "accepted") {
+        return json(event, 400, { message: result });
+      }
+      return json(event, 200, { status: result });
     }
-
-    const bytes = Buffer.from(match[2], "base64");
-    await s3.send(
-      new PutObjectCommand({
-        Bucket: AVATAR_BUCKET,
-        // url-encoded so a username with a space or slash cannot reshape the
-        // key; the extension stays .jpg even for png/webp because the key is
-        // an identity pointer, not a filename
-        Key: `avatars/${encodeURIComponent(username)}.jpg`,
-        Body: bytes,
-        ContentType: `image/${match[1]}`,
-      })
-    );
-
-    // the wallet is the source of truth for the avatar pointer — no Cognito
-    // attribute write needed (federated tokens can't do those without extra
-    // scopes)
-    const avatar = `u|${Date.now()}`;
-    await setAvatarPointer(username, avatar);
-
-    return json(event, 200, { avatar });
+    if (action === "accept") {
+      const result = await acceptFriendRequest(me, them);
+      if (result !== "accepted") return json(event, 400, { message: result });
+      return json(event, 200, { status: result });
+    }
+    if (action === "decline") {
+      await declineFriendRequest(me, them);
+      return json(event, 200, { status: "declined" });
+    }
+    if (action === "remove") {
+      await removeFriend(me, them);
+      return json(event, 200, { status: "removed" });
+    }
+    return json(event, 400, { message: "Unknown action" });
   } catch (err) {
-    console.error("avatar upload error:", err);
+    console.error("friend action error:", err);
     return json(event, 500, { message: "Internal server error" });
   }
 };

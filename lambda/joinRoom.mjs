@@ -1,10 +1,8 @@
 /**
  * ===========================================================================
- * avatarUpload — POST /avatar
+ * joinRoom — POST /joinRoom
  * ===========================================================================
- * Stores the player's profile picture in S3 and stamps the wallet's avatar
- * pointer. The pointer write is what makes the new picture actually appear —
- * the frontend reads it off the wallet and appends the version as ?v=.
+ * Adds the player to a lobby's roster (password-checked if private).
  *
  * Paste-ready AWS Lambda handler. NO third-party dependencies: everything
  * used here either ships in the Node.js 18/20/22 Lambda runtime (AWS SDK v3)
@@ -18,8 +16,7 @@
  * └─────────────────────────────────────────────────────────────────────────┘
  *
  * ── REQUIRED ENVIRONMENT VARIABLES ─────────────────────────────────────────
- *   AVATAR_BUCKET          ipak-se-okrece-avatars
- *   WALLETS_TABLE          Wallets
+ *   LOBBIES_TABLE          Lobbies
  *   COGNITO_USER_POOL_ID   eu-west-3_Uylh5ZFUK
  *   COGNITO_CLIENT_ID      3j69q67dfk60kl92gukqhdlr91
  *   ALLOWED_ORIGIN         https://<your-vercel-domain>,http://localhost:3000
@@ -33,17 +30,17 @@
  *     "Version": "2012-10-17",
  *     "Statement": [
  *       { "Effect": "Allow",
- *         "Action": ["s3:PutObject"],
- *         "Resource": "arn:aws:s3:::ipak-se-okrece-avatars/avatars/*" },
+ *         "Action": ["dynamodb:UpdateItem"],
+ *         "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Lobbies" },
  *       { "Effect": "Allow",
- *         "Action": ["dynamodb:PutItem", "dynamodb:UpdateItem"],
- *         "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Wallets" }
+ *         "Action": ["dynamodb:Query"],
+ *         "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Lobbies/index/code-index" }
  *     ]
  *   }
  *   Plus AWSLambdaBasicExecutionRole for CloudWatch logs.
  *
  * ── API GATEWAY ────────────────────────────────────────────────────────────
- *   Route/Method:  POST /avatar
+ *   Route/Method:  POST /joinRoom
  *   Integration:   Lambda proxy integration (HTTP API payload 2.0, or REST
  *                  "Use Lambda Proxy integration" — this handler reads both).
  *   binaryMediaTypes: not needed — request and response are both JSON.
@@ -60,49 +57,67 @@
  *   to an empty string here.
  *
  * ── CONTRACT (matches the Express route exactly — do not change) ───────────
- *   Request:  POST /avatar   { "image": "data:image/jpeg;base64,..." }
- *             jpeg | png | webp, data URL at most 700 000 chars (~500 KB)
- *   Response: 200 { avatar: "u|<epoch-ms>" }
- *             400 { message: "Image missing or too large" }
- *             400 { message: "Unsupported image format" }
- *             500 { message: "Internal server error" }
- *   Side effects: s3://ipak-se-okrece-avatars/avatars/{username}.jpg
- *                 Wallets.avatar = "u|<epoch-ms>"
+ *   Request:  POST /joinRoom   { "roomCode": 123456, "id": "<playerId>",
+ *                                "password"?: "..." }
+ *   Response: 200 { lobbyId }
+ *             400 { message: "Invalid room code" | "Invalid or missing player ID" }
+ *             401 { message: "password_required" }
+ *             403 { message: "wrong_password" }
+ *             404 { message: "Room not found" }
+ *             409 { message: "room_full" }
+ *             500 { message: "Server error" }
  *   Auth:     Authorization: Bearer <Cognito ACCESS token>
  *             401 { message: "Authentication required" } when absent/invalid.
  *             The username comes from the verified token, NEVER from the
  *             body, so a client cannot act as another player.
  *
- * ── NOTE ───────────────────────────────────────────────────────────────────
- *   The wallet pointer is written with a targeted UpdateExpression rather
- *   than the Express getWallet/saveWallet round-trip. Same end state, but a
- *   whole-item rewrite can clobber a coins/streak write from a match
- *   finishing at the same moment. If the player has no wallet row yet the
- *   conditional update fails and the full default row is created — those
- *   defaults mirror freshWallet() in src/server/game/wallet.ts, so keep the
- *   two in sync.
+ * ── ⚠ DEGRADED vs THE EXPRESS SERVER ───────────────────────────────────────
+ *   The full-room check. Express asks isLiveRoomFull() first — the live
+ *   in-memory seat count — and only falls back to the stored roster length.
+ *   A Lambda has no live count, so only the stored roster is used. A player
+ *   who left mid-game without the roster being rewritten still occupies a
+ *   seat here. MAX_PLAYERS (6) is unchanged.
  *
- * Ported from: uploadAvatarHandler in src/server/apis/avatars.ts
+
+ * ── ⚠ PRIVATE-ROOM PASSWORDS: bcrypt IS GONE, scrypt REPLACES IT ───────────
+ *   The Express server hashes private-room passwords with `bcrypt`, a NATIVE
+ *   module. Native modules cannot be pasted into the console — they need a
+ *   compiled binary shipped in a zip or layer built for the function's
+ *   architecture. Rather than break the "paste and go" promise, this handler
+ *   uses scrypt from Node's built-in node:crypto instead.
+ *
+ *   CONSEQUENCE, and you must decide what to do about it:
+ *   Private rooms created by the Express server carry a bcrypt hash
+ *   ("$2b$..."), which this code CANNOT verify. joinRoom.mjs detects those,
+ *   logs them, and answers 500 { message: "legacy_password_hash" } rather
+ *   than pretending the password was wrong. Private rooms created by these
+ *   Lambdas carry a scrypt hash the Express server cannot verify either.
+ *   So: do not run both for private rooms at once. Public rooms are
+ *   unaffected — they have no password at all.
+ *
+ *   Options: (a) move private rooms to Lambda in one cut and let existing
+ *   ones expire; (b) keep createRoom/joinRoom on Express and move only the
+ *   other routes; (c) add bcrypt to both sides via a Lambda layer, which
+ *   gives up console-pasting for these two functions.
+ *
+ * Ported from: joinRoom in src/server/apis/post/room_operations/join_room.ts
  * ===========================================================================
  */
 
 import crypto from "node:crypto";
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
-  PutCommand,
+  QueryCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 
 // ─── config ────────────────────────────────────────────────────────────────
 const REGION = process.env.AWS_REGION || "eu-west-3";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? "http://localhost:3000";
-const AVATAR_BUCKET = process.env.AVATAR_BUCKET || "ipak-se-okrece-avatars";
-const WALLETS_TABLE = process.env.WALLETS_TABLE || "Wallets";
+const LOBBIES_TABLE = process.env.LOBBIES_TABLE || "Lobbies";
 
 // clients at module scope so warm invocations reuse the connections
-const s3 = new S3Client({ region: REGION });
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
 
 // ─── request/response helpers (both API Gateway payload formats) ───────────
@@ -231,66 +246,61 @@ function bearerFrom(event) {
   return token.trim() || null;
 }
 
-// uploads arrive as a browser-downscaled 256x256 JPEG data URL
-const MAX_DATA_URL_LENGTH = 700_000; // ~500 KB decoded
-const CREDIT_CAP = 5;
+// ─── private-room passwords: scrypt, not bcrypt ────────────────────────────
+// See the ⚠ note at the top of this file. Format:
+//   scrypt$<N>$<r>$<p>$<salt-b64>$<hash-b64>
+const SCRYPT_N = 16384, SCRYPT_R = 8, SCRYPT_P = 1, SCRYPT_KEYLEN = 32;
 
-/** mirrors freshWallet() in src/server/game/wallet.ts */
-function freshWallet(username, avatar) {
-  return {
-    username,
-    credits: CREDIT_CAP,
-    lastRefillAt: Date.now(),
-    coins: 0,
-    ownedAvatars: [],
-    wins: 0,
-    gamesPlayed: 0,
-    roundsPlayed: 0,
-    matchHistory: [],
-    points: 0,
-    currentStreak: 0,
-    bestStreak: 0,
-    betsWon: 0,
-    achievements: [],
-    friends: [],
-    friendRequests: [],
-    avatar,
-    displayName: null,
-  };
+function scryptHash(password) {
+  const salt = crypto.randomBytes(16);
+  const key = crypto.scryptSync(password, salt, SCRYPT_KEYLEN, {
+    N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P,
+  });
+  return [
+    "scrypt", SCRYPT_N, SCRYPT_R, SCRYPT_P,
+    salt.toString("base64"), key.toString("base64"),
+  ].join("$");
 }
 
-/** writes only the avatar attribute; creates the row if the player has none */
-async function setAvatarPointer(username, avatar) {
-  const update = (guarded) =>
-    ddb.send(
-      new UpdateCommand({
-        TableName: WALLETS_TABLE,
-        Key: { username },
-        UpdateExpression: "SET avatar = :avatar",
-        ExpressionAttributeValues: { ":avatar": avatar },
-        ...(guarded ? { ConditionExpression: "attribute_exists(username)" } : {}),
-      })
-    );
-
-  try {
-    await update(true);
-  } catch (err) {
-    if (err?.name !== "ConditionalCheckFailedException") throw err;
-    try {
-      await ddb.send(
-        new PutCommand({
-          TableName: WALLETS_TABLE,
-          Item: freshWallet(username, avatar),
-          ConditionExpression: "attribute_not_exists(username)",
-        })
-      );
-    } catch (putErr) {
-      if (putErr?.name !== "ConditionalCheckFailedException") throw putErr;
-      // lost the race against a wallet created in between — just set the field
-      await update(false);
-    }
+/** returns true/false, or throws BcryptHashError for a legacy bcrypt hash */
+function scryptVerify(password, stored) {
+  if (typeof stored !== "string" || !stored) return false;
+  if (stored.startsWith("$2")) {
+    // a bcrypt hash written by the Express server — unverifiable here
+    const err = new Error("legacy bcrypt hash");
+    err.name = "BcryptHashError";
+    throw err;
   }
+  const [tag, n, r, p, saltB64, keyB64] = stored.split("$");
+  if (tag !== "scrypt") return false;
+  const key = crypto.scryptSync(password, Buffer.from(saltB64, "base64"),
+    Buffer.from(keyB64, "base64").length,
+    { N: Number(n), r: Number(r), p: Number(p) });
+  const expected = Buffer.from(keyB64, "base64");
+  return key.length === expected.length && crypto.timingSafeEqual(key, expected);
 }
+
+/**
+ * Query a table by partition key, optionally through a secondary index.
+ * Mirrors queryByKey() in src/server/helpers/query_db.ts, with one fix: the
+ * original builds the placeholder name out of the VALUE
+ * (`${keyName} = :${keyValue}`), which throws a ValidationException as soon
+ * as the value contains a '.', '-' or a space — e.g. any username that isn't
+ * plain alphanumeric. A constant ':val' behaves identically otherwise.
+ */
+async function queryByKey(tableName, keyName, keyValue, indexName) {
+  const res = await ddb.send(
+    new QueryCommand({
+      TableName: tableName,
+      ...(indexName ? { IndexName: indexName } : {}),
+      KeyConditionExpression: `${keyName} = :val`,
+      ExpressionAttributeValues: { ":val": keyValue },
+    })
+  );
+  return res.Items ?? [];
+}
+
+const MAX_PLAYERS = 6;
 
 // ─── handler ───────────────────────────────────────────────────────────────
 export const handler = async (event) => {
@@ -313,37 +323,73 @@ export const handler = async (event) => {
   }
 
   try {
-    const { image } = body;
-    if (typeof image !== "string" || image.length > MAX_DATA_URL_LENGTH) {
-      return json(event, 400, { message: "Image missing or too large" });
-    }
-    const match = image.match(/^data:image\/(jpeg|png|webp);base64,(.+)$/);
-    if (!match) {
-      return json(event, 400, { message: "Unsupported image format" });
+    const { roomCode, id, password } = body;
+    if (isNaN(roomCode)) {
+      return json(event, 400, { message: "Invalid room code" });
     }
 
-    const bytes = Buffer.from(match[2], "base64");
-    await s3.send(
-      new PutObjectCommand({
-        Bucket: AVATAR_BUCKET,
-        // url-encoded so a username with a space or slash cannot reshape the
-        // key; the extension stays .jpg even for png/webp because the key is
-        // an identity pointer, not a filename
-        Key: `avatars/${encodeURIComponent(username)}.jpg`,
-        Body: bytes,
-        ContentType: `image/${match[1]}`,
+    const items = await queryByKey(LOBBIES_TABLE, "code", Number(roomCode), "code-index");
+    const data = items[0];
+    if (!data) return json(event, 404, { message: "Room not found" });
+
+    const primaryKey = data.lobby_id;
+    const players = data.players || [];
+    const playerExists = players.some((p) => p.player === username);
+
+    // members who already joined don't re-enter the password
+    if (data.isPrivate && !playerExists) {
+      if (typeof password !== "string" || password.length === 0) {
+        return json(event, 401, { message: "password_required" });
+      }
+      let ok;
+      try {
+        ok = scryptVerify(password, data.passwordHash ?? "");
+      } catch (err) {
+        if (err?.name === "BcryptHashError") {
+          // room created by the Express server — see the ⚠ note in the header
+          console.error(
+            "legacy bcrypt passwordHash on lobby",
+            primaryKey,
+            "— this room cannot be joined through Lambda; recreate it"
+          );
+          return json(event, 500, { message: "legacy_password_hash" });
+        }
+        throw err;
+      }
+      if (!ok) return json(event, 403, { message: "wrong_password" });
+    }
+
+    if (playerExists) return json(event, 200, { lobbyId: primaryKey });
+    if (players.length >= MAX_PLAYERS) {
+      return json(event, 409, { message: "room_full" });
+    }
+    if (!id || typeof id !== "string") {
+      return json(event, 400, { message: "Invalid or missing player ID" });
+    }
+
+    await ddb.send(
+      new UpdateCommand({
+        TableName: LOBBIES_TABLE,
+        Key: { lobby_id: String(primaryKey) },
+        UpdateExpression:
+          "SET players = list_append(if_not_exists(players, :emptyList), :newPlayerList)",
+        ExpressionAttributeValues: {
+          ":newPlayerList": [
+            {
+              id: String(id),
+              player: username,
+              points: Number(500),
+              role: String("Member"),
+            },
+          ],
+          ":emptyList": [],
+        },
+        ReturnValues: "ALL_NEW",
       })
     );
-
-    // the wallet is the source of truth for the avatar pointer — no Cognito
-    // attribute write needed (federated tokens can't do those without extra
-    // scopes)
-    const avatar = `u|${Date.now()}`;
-    await setAvatarPointer(username, avatar);
-
-    return json(event, 200, { avatar });
+    return json(event, 200, { lobbyId: primaryKey });
   } catch (err) {
-    console.error("avatar upload error:", err);
-    return json(event, 500, { message: "Internal server error" });
+    console.error("Something went wrong:", err);
+    return json(event, 500, { message: "Server error" });
   }
 };

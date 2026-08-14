@@ -1,10 +1,8 @@
 /**
  * ===========================================================================
- * avatarUpload — POST /avatar
+ * myActiveRoom — POST /myActiveRoom
  * ===========================================================================
- * Stores the player's profile picture in S3 and stamps the wallet's avatar
- * pointer. The pointer write is what makes the new picture actually appear —
- * the frontend reads it off the wallet and appends the version as ?v=.
+ * "You dropped out of a live game — rejoin?" prompt on the home screen.
  *
  * Paste-ready AWS Lambda handler. NO third-party dependencies: everything
  * used here either ships in the Node.js 18/20/22 Lambda runtime (AWS SDK v3)
@@ -18,8 +16,6 @@
  * └─────────────────────────────────────────────────────────────────────────┘
  *
  * ── REQUIRED ENVIRONMENT VARIABLES ─────────────────────────────────────────
- *   AVATAR_BUCKET          ipak-se-okrece-avatars
- *   WALLETS_TABLE          Wallets
  *   COGNITO_USER_POOL_ID   eu-west-3_Uylh5ZFUK
  *   COGNITO_CLIENT_ID      3j69q67dfk60kl92gukqhdlr91
  *   ALLOWED_ORIGIN         https://<your-vercel-domain>,http://localhost:3000
@@ -29,21 +25,11 @@
  * with no env vars set. Setting them is still the right thing to do.
  *
  * ── IAM (inline policy on this function's execution role) ──────────────────
- *   {
- *     "Version": "2012-10-17",
- *     "Statement": [
- *       { "Effect": "Allow",
- *         "Action": ["s3:PutObject"],
- *         "Resource": "arn:aws:s3:::ipak-se-okrece-avatars/avatars/*" },
- *       { "Effect": "Allow",
- *         "Action": ["dynamodb:PutItem", "dynamodb:UpdateItem"],
- *         "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Wallets" }
- *     ]
- *   }
- *   Plus AWSLambdaBasicExecutionRole for CloudWatch logs.
+ *   None beyond AWSLambdaBasicExecutionRole (CloudWatch logs).
+ *   This function touches no AWS resource at all.
  *
  * ── API GATEWAY ────────────────────────────────────────────────────────────
- *   Route/Method:  POST /avatar
+ *   Route/Method:  POST /myActiveRoom
  *   Integration:   Lambda proxy integration (HTTP API payload 2.0, or REST
  *                  "Use Lambda Proxy integration" — this handler reads both).
  *   binaryMediaTypes: not needed — request and response are both JSON.
@@ -60,50 +46,35 @@
  *   to an empty string here.
  *
  * ── CONTRACT (matches the Express route exactly — do not change) ───────────
- *   Request:  POST /avatar   { "image": "data:image/jpeg;base64,..." }
- *             jpeg | png | webp, data URL at most 700 000 chars (~500 KB)
- *   Response: 200 { avatar: "u|<epoch-ms>" }
- *             400 { message: "Image missing or too large" }
- *             400 { message: "Unsupported image format" }
- *             500 { message: "Internal server error" }
- *   Side effects: s3://ipak-se-okrece-avatars/avatars/{username}.jpg
- *                 Wallets.avatar = "u|<epoch-ms>"
+ *   Request:  POST /myActiveRoom   (no body)
+ *   Response: 200 { room: { code, lobbyId, roomName, phase } | null }
  *   Auth:     Authorization: Bearer <Cognito ACCESS token>
  *             401 { message: "Authentication required" } when absent/invalid.
  *             The username comes from the verified token, NEVER from the
  *             body, so a client cannot act as another player.
  *
- * ── NOTE ───────────────────────────────────────────────────────────────────
- *   The wallet pointer is written with a targeted UpdateExpression rather
- *   than the Express getWallet/saveWallet round-trip. Same end state, but a
- *   whole-item rewrite can clobber a coins/streak write from a match
- *   finishing at the same moment. If the player has no wallet row yet the
- *   conditional update fails and the full default row is created — those
- *   defaults mirror freshWallet() in src/server/game/wallet.ts, so keep the
- *   two in sync.
+ * ── ⚠ DEGRADED vs THE EXPRESS SERVER ───────────────────────────────────────
+ *   ⚠⚠ THIS ENDPOINT ALWAYS RETURNS { room: null } IN LAMBDA. ⚠⚠
+ *   It is the one route with NO database behind it at all: findDroppedGame()
+ *   walks the live in-memory room map looking for a seat belonging to a
+ *   disconnected player, and that map only exists inside the running
+ *   WebSocket game server. There is nothing to read in DynamoDB.
  *
- * Ported from: uploadAvatarHandler in src/server/apis/avatars.ts
+ *   Deploying this Lambda is therefore only useful to keep the route from
+ *   404-ing while the rest of the API moves — the reconnect prompt will
+ *   simply never appear. If you want the prompt to work, the route has to
+ *   stay on the Express host, or the live room state has to move to
+ *   DynamoDB first. See docs/websocket-game-later.md.
+ *
+ * Ported from: myActiveRoomHandler in economy.ts + findDroppedGame in game/manager.ts
  * ===========================================================================
  */
 
 import crypto from "node:crypto";
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import {
-  DynamoDBDocumentClient,
-  PutCommand,
-  UpdateCommand,
-} from "@aws-sdk/lib-dynamodb";
 
 // ─── config ────────────────────────────────────────────────────────────────
 const REGION = process.env.AWS_REGION || "eu-west-3";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? "http://localhost:3000";
-const AVATAR_BUCKET = process.env.AVATAR_BUCKET || "ipak-se-okrece-avatars";
-const WALLETS_TABLE = process.env.WALLETS_TABLE || "Wallets";
-
-// clients at module scope so warm invocations reuse the connections
-const s3 = new S3Client({ region: REGION });
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
 
 // ─── request/response helpers (both API Gateway payload formats) ───────────
 function header(event, name) {
@@ -140,15 +111,6 @@ function json(event, statusCode, body) {
     headers: { "Content-Type": "application/json", ...corsHeaders(event) },
     body: JSON.stringify(body),
   };
-}
-
-/** parsed JSON body, or {} — Express's express.json() tolerates an empty body */
-function parseBody(event) {
-  const raw = event.isBase64Encoded
-    ? Buffer.from(event.body || "", "base64").toString("utf8")
-    : event.body || "";
-  if (!raw.trim()) return {};
-  return JSON.parse(raw);
 }
 
 // ─── Cognito access-token verification (no dependencies) ───────────────────
@@ -231,67 +193,6 @@ function bearerFrom(event) {
   return token.trim() || null;
 }
 
-// uploads arrive as a browser-downscaled 256x256 JPEG data URL
-const MAX_DATA_URL_LENGTH = 700_000; // ~500 KB decoded
-const CREDIT_CAP = 5;
-
-/** mirrors freshWallet() in src/server/game/wallet.ts */
-function freshWallet(username, avatar) {
-  return {
-    username,
-    credits: CREDIT_CAP,
-    lastRefillAt: Date.now(),
-    coins: 0,
-    ownedAvatars: [],
-    wins: 0,
-    gamesPlayed: 0,
-    roundsPlayed: 0,
-    matchHistory: [],
-    points: 0,
-    currentStreak: 0,
-    bestStreak: 0,
-    betsWon: 0,
-    achievements: [],
-    friends: [],
-    friendRequests: [],
-    avatar,
-    displayName: null,
-  };
-}
-
-/** writes only the avatar attribute; creates the row if the player has none */
-async function setAvatarPointer(username, avatar) {
-  const update = (guarded) =>
-    ddb.send(
-      new UpdateCommand({
-        TableName: WALLETS_TABLE,
-        Key: { username },
-        UpdateExpression: "SET avatar = :avatar",
-        ExpressionAttributeValues: { ":avatar": avatar },
-        ...(guarded ? { ConditionExpression: "attribute_exists(username)" } : {}),
-      })
-    );
-
-  try {
-    await update(true);
-  } catch (err) {
-    if (err?.name !== "ConditionalCheckFailedException") throw err;
-    try {
-      await ddb.send(
-        new PutCommand({
-          TableName: WALLETS_TABLE,
-          Item: freshWallet(username, avatar),
-          ConditionExpression: "attribute_not_exists(username)",
-        })
-      );
-    } catch (putErr) {
-      if (putErr?.name !== "ConditionalCheckFailedException") throw putErr;
-      // lost the race against a wallet created in between — just set the field
-      await update(false);
-    }
-  }
-}
-
 // ─── handler ───────────────────────────────────────────────────────────────
 export const handler = async (event) => {
   // CORS preflight, when API Gateway is not answering it for us
@@ -303,47 +204,8 @@ export const handler = async (event) => {
   if (!identity) {
     return json(event, 401, { message: "Authentication required" });
   }
-  const username = identity.username;
 
-  let body;
-  try {
-    body = parseBody(event);
-  } catch {
-    return json(event, 400, { message: "Invalid JSON body" });
-  }
-
-  try {
-    const { image } = body;
-    if (typeof image !== "string" || image.length > MAX_DATA_URL_LENGTH) {
-      return json(event, 400, { message: "Image missing or too large" });
-    }
-    const match = image.match(/^data:image\/(jpeg|png|webp);base64,(.+)$/);
-    if (!match) {
-      return json(event, 400, { message: "Unsupported image format" });
-    }
-
-    const bytes = Buffer.from(match[2], "base64");
-    await s3.send(
-      new PutObjectCommand({
-        Bucket: AVATAR_BUCKET,
-        // url-encoded so a username with a space or slash cannot reshape the
-        // key; the extension stays .jpg even for png/webp because the key is
-        // an identity pointer, not a filename
-        Key: `avatars/${encodeURIComponent(username)}.jpg`,
-        Body: bytes,
-        ContentType: `image/${match[1]}`,
-      })
-    );
-
-    // the wallet is the source of truth for the avatar pointer — no Cognito
-    // attribute write needed (federated tokens can't do those without extra
-    // scopes)
-    const avatar = `u|${Date.now()}`;
-    await setAvatarPointer(username, avatar);
-
-    return json(event, 200, { avatar });
-  } catch (err) {
-    console.error("avatar upload error:", err);
-    return json(event, 500, { message: "Internal server error" });
-  }
+  // Nothing to query: the answer lives in the game server's memory.
+  // See the DEGRADED note at the top of this file.
+  return json(event, 200, { room: null });
 };

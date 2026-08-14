@@ -1,11 +1,8 @@
 /**
  * ===========================================================================
- * avatarServe — GET /avatar/img/{username}
+ * lobbies — GET /lobbies
  * ===========================================================================
- * Streams a player's stored profile picture back. Public on purpose —
- * other players' pictures are shown all over the arena, same as the Express
- * route, which sits outside requireAuth. The bucket stays private; this
- * function is its only reader.
+ * The joinable-lobby list behind the Join Room screen. Public.
  *
  * Paste-ready AWS Lambda handler. NO third-party dependencies: everything
  * used here either ships in the Node.js 18/20/22 Lambda runtime (AWS SDK v3)
@@ -19,7 +16,7 @@
  * └─────────────────────────────────────────────────────────────────────────┘
  *
  * ── REQUIRED ENVIRONMENT VARIABLES ─────────────────────────────────────────
- *   AVATAR_BUCKET          ipak-se-okrece-avatars
+ *   LOBBIES_TABLE          Lobbies
  *   ALLOWED_ORIGIN         https://<your-vercel-domain>,http://localhost:3000
  *   AWS_REGION             set automatically by Lambda — do NOT add it by hand
  *                          (Lambda rejects reserved env var names).
@@ -31,32 +28,17 @@
  *     "Version": "2012-10-17",
  *     "Statement": [
  *       { "Effect": "Allow",
- *         "Action": ["s3:GetObject"],
- *         "Resource": "arn:aws:s3:::ipak-se-okrece-avatars/avatars/*" }
+ *         "Action": ["dynamodb:Scan"],
+ *         "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Lobbies" }
  *     ]
  *   }
  *   Plus AWSLambdaBasicExecutionRole for CloudWatch logs.
  *
  * ── API GATEWAY ────────────────────────────────────────────────────────────
- *   Route/Method:  GET /avatar/img/{username}
+ *   Route/Method:  GET /lobbies
  *   Integration:   Lambda proxy integration (HTTP API payload 2.0, or REST
  *                  "Use Lambda Proxy integration" — this handler reads both).
- *   binaryMediaTypes: ⚠ THIS IS THE ONE ROUTE WHERE IT MATTERS.
- *                  This handler returns the image base64-encoded with
- *                  isBase64Encoded: true. What happens next depends on the
- *                  API type:
- *                  • HTTP API (payload 2.0) — decodes it to raw bytes
- *                    automatically. Nothing to configure. Recommended.
- *                  • REST API — you MUST add a binary media type or the
- *                    browser gets a base64 STRING labelled image/jpeg: a
- *                    broken image, 200 status, nothing in the logs.
- *                    API settings -> Binary media types -> add the
- *                    wildcard  * / *  (typed WITHOUT the spaces), then
- *                    redeploy the stage. Use the wildcard rather than
- *                    image/jpeg: REST APIs only decode when the CLIENT's
- *                    Accept header matches a configured type, and
- *                    browsers send 'image/avif,image/webp,* / *' for
- *                    <img> tags.
+ *   binaryMediaTypes: not needed — request and response are both JSON.
  *
  * ── CORS ───────────────────────────────────────────────────────────────────
  *   This handler emits the CORS headers itself (from ALLOWED_ORIGIN) and
@@ -68,37 +50,37 @@
  *   to an empty string here.
  *
  * ── CONTRACT (matches the Express route exactly — do not change) ───────────
- *   Request:  GET /avatar/img/{username}?v=<version>
- *   Response: 200 the image bytes
- *                  Content-Type: image/jpeg (or whatever was uploaded)
- *                  Cache-Control: public, max-age=86400, immutable
- *             404 no avatar for that user
- *   The ?v= version is the cache-buster and is intentionally ignored by the
- *   server: the pointer changing in the wallet changes the URL, and the URL
- *   changing is what defeats the year-long immutable cache.
+ *   Request:  GET /lobbies
+ *   Response: 200 { lobbies: [{ lobbyId, code, roomName, isPrivate,
+ *                               playerCount, phase, isLive, createdAt }] }
  *
- * ── NOTE ───────────────────────────────────────────────────────────────────
- *   The API Gateway path parameter MUST be named {username} — the handler
- *   reads event.pathParameters.username.
+ * ── ⚠ DEGRADED vs THE EXPRESS SERVER ───────────────────────────────────────
+ *   playerCount is always 0, phase always "lobby" and isLive always false.
+ *   The Express version fills these from getLiveRoomSummaries(), the live
+ *   WebSocket room map in the game server's memory, which a Lambda cannot
+ *   see. The knock-on effect is the filter: Express keeps a lobby if it has
+ *   connected players OR was created in the last hour; here only the
+ *   created-in-the-last-hour arm can ever be true, so a busy lobby older
+ *   than an hour disappears from the list. Sort order and the 20-item cap
+ *   are unchanged. See docs/websocket-game-later.md.
  *
- *   s3:ListBucket is deliberately omitted from the IAM policy above: without
- *   it, a GetObject on a key this role CAN read still returns a clean
- *   NoSuchKey (-> 404) when the object is missing, which is what this
- *   handler expects.
- *
- * Ported from: getAvatarImageHandler in src/server/apis/avatars.ts
+ * Ported from: lobbiesHandler + listActiveLobbies in src/server/apis/economy.ts
  * ===========================================================================
  */
 
-import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  ScanCommand,
+} from "@aws-sdk/lib-dynamodb";
 
 // ─── config ────────────────────────────────────────────────────────────────
 const REGION = process.env.AWS_REGION || "eu-west-3";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? "http://localhost:3000";
-const AVATAR_BUCKET = process.env.AVATAR_BUCKET || "ipak-se-okrece-avatars";
+const LOBBIES_TABLE = process.env.LOBBIES_TABLE || "Lobbies";
 
 // clients at module scope so warm invocations reuse the connections
-const s3 = new S3Client({ region: REGION });
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
 
 // ─── request/response helpers (both API Gateway payload formats) ───────────
 function header(event, name) {
@@ -129,6 +111,57 @@ function corsHeaders(event) {
   };
 }
 
+function json(event, statusCode, body) {
+  return {
+    statusCode,
+    headers: { "Content-Type": "application/json", ...corsHeaders(event) },
+    body: JSON.stringify(body),
+  };
+}
+
+const FRESH_LOBBY_MS = 60 * 60 * 1000;
+
+/**
+ * The single definition of an "active" lobby, shared with getActiveRooms.mjs:
+ * joinable (waiting/countdown) AND either someone is connected right now or it
+ * was created within the last hour. The "connected right now" arm needs the
+ * live game server — see the DEGRADED note above.
+ */
+async function listActiveLobbies() {
+  const scan = await ddb.send(
+    new ScanCommand({
+      TableName: LOBBIES_TABLE,
+      ProjectionExpression:
+        "lobby_id, code, roomName, players, createdAt, isPrivate, #st",
+      ExpressionAttributeNames: { "#st": "state" },
+    })
+  );
+  return (scan.Items ?? [])
+    .filter((l) => l.state !== "finished")
+    .map((l) => ({
+      lobbyId: String(l.lobby_id),
+      code: Number(l.code),
+      roomName: l.roomName ?? `Room ${l.code}`,
+      isPrivate: Boolean(l.isPrivate),
+      playerCount: 0,
+      phase: "lobby",
+      isLive: false,
+      createdAt: l.createdAt ?? null,
+    }))
+    .filter((l) => {
+      if (l.phase !== "lobby" && l.phase !== "countdown") return false;
+      if (l.isLive && l.playerCount > 0) return true;
+      const age = Date.now() - new Date(l.createdAt ?? 0).getTime();
+      return age < FRESH_LOBBY_MS;
+    })
+    .sort(
+      (a, b) =>
+        new Date(b.createdAt ?? 0).getTime() -
+        new Date(a.createdAt ?? 0).getTime()
+    )
+    .slice(0, 20);
+}
+
 // ─── handler ───────────────────────────────────────────────────────────────
 export const handler = async (event) => {
   // CORS preflight, when API Gateway is not answering it for us
@@ -136,42 +169,10 @@ export const handler = async (event) => {
     return { statusCode: 204, headers: corsHeaders(event), body: "" };
   }
 
-  const username = event.pathParameters?.username;
-  if (!username) {
-    return { statusCode: 400, headers: corsHeaders(event), body: "" };
-  }
-
   try {
-    // API Gateway hands the path parameter over already percent-decoded, the
-    // same as Express's req.params, so it is re-encoded here to land on the
-    // exact key avatarUpload wrote. Decoding it again first would corrupt a
-    // username containing a literal '%'.
-    const obj = await s3.send(
-      new GetObjectCommand({
-        Bucket: AVATAR_BUCKET,
-        Key: `avatars/${encodeURIComponent(username)}.jpg`,
-      })
-    );
-    const bytes = await obj.Body.transformToByteArray();
-
-    return {
-      statusCode: 200,
-      headers: {
-        "Content-Type": obj.ContentType || "image/jpeg",
-        // versioned query string does the cache-busting
-        "Cache-Control": "public, max-age=86400, immutable",
-        ...corsHeaders(event),
-      },
-      body: Buffer.from(bytes).toString("base64"),
-      isBase64Encoded: true,
-    };
+    return json(event, 200, { lobbies: await listActiveLobbies() });
   } catch (err) {
-    // SDK v3 surfaces the missing-key case as NoSuchKey; the $metadata check
-    // covers the NotFound shape the error can otherwise take
-    if (err?.name === "NoSuchKey" || err?.$metadata?.httpStatusCode === 404) {
-      return { statusCode: 404, headers: corsHeaders(event), body: "" };
-    }
-    console.error("avatar fetch error:", err);
-    return { statusCode: 500, headers: corsHeaders(event), body: "" };
+    console.error("lobbies error:", err);
+    return json(event, 500, { message: "Internal server error" });
   }
 };
