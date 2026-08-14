@@ -2,3 +2,7 @@
 .env
 .env.local
 /build
+# SAM build artifacts (samconfig.toml is committed on purpose — it pins the
+# stack name, region and parameters so redeploys are reproducible)
+/lambda/node_modules
+/.aws-sam

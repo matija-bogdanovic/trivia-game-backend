@@ -1,0 +1,149 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  Avatar upload/serve for the ipakseokrece trivia app. Two Lambdas behind an
+  HTTP API, matching the routes the frontend already calls:
+
+    POST /avatar                      -> upload (Cognito access token required)
+    GET  /avatar/img/{username}?v=..  -> serve the stored JPEG
+
+  The rest of the game (Express + ws, live rooms, in-process timers) stays on
+  its always-on host — see docs/render-deployment.md. Only these two stateless
+  endpoints move to Lambda.
+
+Parameters:
+  AllowedOrigins:
+    Type: CommaDelimitedList
+    Default: "http://localhost:3000"
+    Description: >
+      Browser origins allowed to call the API, comma-separated and with no
+      trailing slash. Include the deployed frontend, e.g.
+      "https://ipakseokrece.vercel.app,http://localhost:3000".
+  AvatarBucket:
+    Type: String
+    Default: ipak-se-okrece-avatars
+    Description: Existing private S3 bucket holding avatars/{username}.jpg
+  WalletsTable:
+    Type: String
+    Default: Wallets
+    Description: DynamoDB table carrying the wallet's `avatar` pointer
+  CognitoUserPoolId:
+    Type: String
+    Default: eu-west-3_Uylh5ZFUK
+  CognitoClientId:
+    Type: String
+    Default: 3j69q67dfk60kl92gukqhdlr91
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [arm64]
+    Timeout: 15
+    MemorySize: 512
+    Environment:
+      Variables:
+        AVATAR_BUCKET: !Ref AvatarBucket
+        WALLETS_TABLE: !Ref WalletsTable
+        COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+        COGNITO_CLIENT_ID: !Ref CognitoClientId
+        NODE_OPTIONS: --enable-source-maps
+        # keep the SDK from re-resolving credentials on every warm call
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: "1"
+
+Resources:
+  # An HTTP API (payload format 2.0), not a REST API, on purpose: it returns a
+  # response with isBase64Encoded=true as raw bytes without any binaryMediaTypes
+  # configuration, and without the REST-API trap where the client's Accept
+  # header has to match a configured binary type or the image comes back as a
+  # base64 string. It is also cheaper. If you ever move this to a REST API, you
+  # MUST set BinaryMediaTypes: ["image/jpeg", "image/png", "image/webp"] (or
+  # "*/*") on the API — see docs/lambda-avatars.md.
+  AvatarApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      # $default means no /Prod prefix, so the paths the frontend already uses
+      # ("/avatar", "/avatar/img/<username>") sit at the root of the API URL.
+      StageName: $default
+      CorsConfiguration:
+        AllowOrigins: !Ref AllowedOrigins
+        AllowHeaders:
+          - authorization
+          - content-type
+        AllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+        MaxAge: 600
+
+  UploadAvatarFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Sourcemap: true
+        Target: node22
+        EntryPoints:
+          - src/upload_avatar.ts
+    Properties:
+      CodeUri: lambda/
+      Handler: upload_avatar.handler
+      Description: POST /avatar — stores the image and stamps the wallet pointer
+      Policies:
+        - Statement:
+            - Sid: PutAvatarObject
+              Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub arn:aws:s3:::${AvatarBucket}/avatars/*
+            - Sid: WalletAvatarPointer
+              Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${WalletsTable}
+      Events:
+        Upload:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AvatarApi
+            Path: /avatar
+            Method: POST
+
+  GetAvatarImageFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Sourcemap: true
+        Target: node22
+        EntryPoints:
+          - src/get_avatar_image.ts
+    Properties:
+      CodeUri: lambda/
+      Handler: get_avatar_image.handler
+      Description: GET /avatar/img/{username} — streams the stored avatar back
+      Policies:
+        - Statement:
+            - Sid: GetAvatarObject
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub arn:aws:s3:::${AvatarBucket}/avatars/*
+      Events:
+        Serve:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AvatarApi
+            Path: /avatar/img/{username}
+            Method: GET
+
+Outputs:
+  AvatarApiUrl:
+    Description: Base URL for the avatar endpoints (no trailing slash)
+    Value: !Sub https://${AvatarApi}.execute-api.${AWS::Region}.amazonaws.com
+  UploadAvatarFunctionArn:
+    Value: !GetAtt UploadAvatarFunction.Arn
+  GetAvatarImageFunctionArn:
+    Value: !GetAtt GetAvatarImageFunction.Arn
