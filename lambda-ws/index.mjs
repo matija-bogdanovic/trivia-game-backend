@@ -15,6 +15,10 @@
  * │ DOES:     connect/disconnect bookkeeping, authenticated `join`, live    │
  * │           lobby presence (`lobby_state`), `chat`, `leave`, `ping`,      │
  * │           and host-leaves-closes-the-room (`room_closed`).              │
+ * │ ENFORCES: host-only actions — `start_game`, `kick_player` and           │
+ * │           `terminate_lobby` are refused with reason "not_host" unless   │
+ * │           the sender is the room's Admin. Server-side and permanent:    │
+ * │           the gate stays in front of the turn engine in Phase 2.        │
  * │ DOES NOT: the turn engine. `start_game`, `submit_answer`, `place_bet`,  │
  * │           `pick_player`, `submit_guess`, `submit_code`, `play_again`,   │
  * │           `kick_player`, `terminate_lobby` all answer                   │
@@ -748,6 +752,70 @@ async function isHostOf(lobby, username) {
 }
 
 /**
+ * HOST-ONLY GATE — a permanent rule, not a Phase 0 placeholder.
+ *
+ * Returns true when the sender may proceed; when it returns false it has
+ * ALREADY answered the client, so the caller must simply stop.
+ *
+ * Why this cannot be bypassed from the client: the identity is not taken from
+ * the message. It is `row.username`, written onto the connection at `join`
+ * from a Cognito access token this function verified itself, and compared
+ * against the Admin entry read fresh from the Lobbies table. A client can
+ * claim any `type` it likes and none of it touches either side of that
+ * comparison. Spoofing it would mean forging a Cognito RS256 signature.
+ *
+ * The lobby is re-read on every call rather than cached on the connection, so
+ * a host transfer takes effect immediately and a stale socket cannot keep
+ * host powers it no longer has.
+ */
+const HOST_ONLY_ACTIONS = new Set([
+  "start_game",
+  "kick_player",
+  "terminate_lobby",
+]);
+
+/** English-neutral; the client localises off `reason` + `action` */
+const HOST_ONLY_MESSAGE = {
+  start_game: "Only the room host can start the game.",
+  kick_player: "Only the room host can remove players.",
+  terminate_lobby: "Only the room host can close the room.",
+};
+
+async function requireHost(event, connectionId, row, action) {
+  if (!row?.username || !row?.lobbyId) {
+    await postTo(event, connectionId, {
+      type: "error",
+      reason: "not_joined",
+      action,
+      message: "Join the room before doing that.",
+    });
+    return false;
+  }
+
+  const lobby = await resolveLobby(row.lobbyId);
+  if (!lobby) {
+    await postTo(event, connectionId, {
+      type: "error",
+      reason: "room_not_found",
+      action,
+      message: "That room no longer exists.",
+    });
+    return false;
+  }
+
+  if (!(await isHostOf(lobby, row.username))) {
+    await postTo(event, connectionId, {
+      type: "error",
+      reason: "not_host",
+      action,
+      message: HOST_ONLY_MESSAGE[action] ?? "Only the room host can do that.",
+    });
+    return false;
+  }
+  return true;
+}
+
+/**
  * leave — an explicit, intentional departure.
  *
  * WHEN THE HOST LEAVES, THE ROOM IS DELETED. This takes precedence over the
@@ -840,6 +908,11 @@ async function onDefault(event) {
       });
       break;
     default:
+      // the host gate runs BEFORE anything else these actions would do, and
+      // stays in front of the turn engine when Phase 2 lands here
+      if (HOST_ONLY_ACTIONS.has(type) && !(await requireHost(event, connectionId, row, type))) {
+        break;
+      }
       if (TURN_ENGINE_ACTIONS.has(type)) {
         await postTo(event, connectionId, {
           type: "not_implemented",
