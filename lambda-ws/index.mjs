@@ -424,18 +424,18 @@ async function lobbyStateMessage(lobby, lobbyId) {
     });
   }
 
-  // mirrors reassignHost(): if the Admin is not here, the longest-present
-  // connected player holds the start button so the lobby is not stuck
-  if (!players.some((p) => p.isHost && p.connected)) {
-    const stand_in = players
-      .filter((p) => p.connected)
-      .sort(
-        (a, b) =>
-          (byUsername.get(a.username)?.joinedAt ?? 0) -
-          (byUsername.get(b.username)?.joinedAt ?? 0)
-      )[0];
-    if (stand_in) stand_in.isHost = true;
-  }
+  // NO STAND-IN HOST. `isHost` above comes from the Lobbies roster and
+  // nothing promotes a connected player on top of it, so this flag and
+  // requireHost() read the same source and cannot disagree.
+  //
+  // There used to be a reassignHost fallback here that handed the flag to the
+  // longest-present connected player whenever the Admin was away, so a lobby
+  // was never left without a start button. Harmless while nothing enforced
+  // host-ness — but once start_game became host-only it started rendering a
+  // start button for someone the server then refused with not_host. It was
+  // also volatile (the flag moved as sockets opened and closed) and could
+  // report two isHost players at once. Showing no start button while the host
+  // is away is the honest state: that is exactly who is allowed to press it.
 
   return {
     type: "lobby_state",
@@ -521,10 +521,10 @@ async function onConnect(event) {
  *   EMPTY_ROOM_GRACE_MS does. Closing on any of them would let a host lose
  *   their room by backgrounding a browser tab.
  *
- *   So a disconnecting host is reported as simply not connected, and the
- *   reassignHost fallback in lobbyStateMessage() hands the start button to
- *   whoever is present until they come back. Deleting the room is reserved
- *   for the two paths that carry real intent: the `leave` message below and
+ *   So a disconnecting host is reported as simply not connected and keeps the
+ *   room and the host role; nobody stands in for them, so the lobby shows no
+ *   start button until they are back. Deleting the room is reserved for the
+ *   two paths that carry real intent: the `leave` message below and
  *   POST /leaveRoom.
  */
 async function onDisconnect(event) {
@@ -818,11 +818,9 @@ async function requireHost(event, connectionId, row, action) {
 /**
  * leave — an explicit, intentional departure.
  *
- * WHEN THE HOST LEAVES, THE ROOM IS DELETED. This takes precedence over the
- * reassignHost fallback in lobbyStateMessage(): that fallback exists so a
- * lobby is not stranded without a start button while the host is briefly
- * away, which is a different situation from the host deliberately leaving.
- * Since the room is gone, the fallback never gets the chance to run.
+ * WHEN THE HOST LEAVES, THE ROOM IS DELETED. Note this is a different case
+ * from the host merely being disconnected, where the room and the host role
+ * both survive untouched — see the $disconnect note above.
  *
  * A non-host leaving is presence-only, exactly as before.
  */
