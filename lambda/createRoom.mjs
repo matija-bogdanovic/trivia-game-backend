@@ -63,7 +63,10 @@
  *               "isPrivate"?: bool, "password"?: "..." (4+ chars if private),
  *               "categories"?: ["Science","History"] — array of strings;
  *                              missing or empty stores ["Mixed"], a non-array
- *                              or a non-string element answers 400 }
+ *                              or a non-string element answers 400,
+ *               "maxPlayers"?: 4 — integer seat count; missing or unusable
+ *                              stores 6, anything else is floored and clamped
+ *                              to 2..8 rather than rejected }
  *   Response: 200 { message: "Room created", roomCode, lobbyId, creditsLeft }
  *             400 { error: "Missing required fields" }
  *             400 { error: "Private rooms need a password (4+ characters)" }
@@ -405,6 +408,27 @@ function normalizeCategories(raw) {
   return cleaned.length ? cleaned : DEFAULT_CATEGORIES;
 }
 
+// ─── room capacity ─────────────────────────────────────────────────────────
+const DEFAULT_MAX_PLAYERS = 6;
+const MIN_ROOM_CAPACITY = 2;
+const MAX_ROOM_CAPACITY = 8;
+
+/**
+ * Normalises `maxPlayers`. Deliberately forgiving in the same style as
+ * normalizeCategories, with one difference: a bad capacity is CLAMPED rather
+ * than rejected, because unlike a category list there is always a sensible
+ * number to fall back to and a room is worth creating either way.
+ *   missing / not a number / NaN  -> 6
+ *   3.7                           -> 3   (floored)
+ *   1 / 99                        -> 2 / 8 (clamped)
+ */
+function normalizeMaxPlayers(raw) {
+  if (raw === undefined || raw === null || raw === "") return DEFAULT_MAX_PLAYERS;
+  const n = Math.floor(Number(raw));
+  if (!Number.isFinite(n)) return DEFAULT_MAX_PLAYERS;
+  return Math.min(MAX_ROOM_CAPACITY, Math.max(MIN_ROOM_CAPACITY, n));
+}
+
 // ─── handler ───────────────────────────────────────────────────────────────
 export const handler = async (event) => {
   // CORS preflight, when API Gateway is not answering it for us
@@ -426,7 +450,8 @@ export const handler = async (event) => {
   }
 
   try {
-    const { playerId, roomName, isPrivate, password, categories } = body;
+    const { playerId, roomName, isPrivate, password, categories, maxPlayers } =
+      body;
     if (!roomName) {
       return json(event, 400, { error: "Missing required fields" });
     }
@@ -436,6 +461,7 @@ export const handler = async (event) => {
         error: "categories must be an array of strings",
       });
     }
+    const roomMaxPlayers = normalizeMaxPlayers(maxPlayers);
     const roomIsPrivate = Boolean(isPrivate);
     if (roomIsPrivate) {
       if (typeof password !== "string" || password.length < 4) {
@@ -470,6 +496,7 @@ export const handler = async (event) => {
           code: Number(roomCode),
           isPrivate: roomIsPrivate,
           categories: roomCategories,
+          maxPlayers: roomMaxPlayers,
           ...(passwordHash ? { passwordHash } : {}),
           players: [
             {

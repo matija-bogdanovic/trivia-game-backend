@@ -93,7 +93,18 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
 
 // ─── game constants (mirrors src/server/game/room.ts) ──────────────────────
 const MIN_PLAYERS = 2;
+/** fallback capacity for rooms written before `maxPlayers` was a stored field */
 const MAX_PLAYERS = 6;
+
+/**
+ * A room's seat count. Every capacity decision goes through here so the number
+ * the client is shown in lobby_state and the number the seat cap enforces on
+ * join can never drift apart.
+ */
+function capacityOf(lobby) {
+  const n = Math.floor(Number(lobby?.maxPlayers));
+  return Number.isFinite(n) && n > 0 ? n : MAX_PLAYERS;
+}
 const STARTING_MONEY = 500;
 const CHAT_MAX_LENGTH = 300;
 const CHAT_MIN_INTERVAL_MS = 500;
@@ -429,7 +440,9 @@ async function lobbyStateMessage(lobby, lobbyId) {
     code: Number(lobby?.code ?? 0),
     isPrivate: Boolean(lobby?.isPrivate),
     minPlayers: MIN_PLAYERS,
-    maxPlayers: MAX_PLAYERS,
+    // the room's own capacity, not the global cap. Rooms written before
+    // maxPlayers existed fall back to 6, which is what they were created under.
+    maxPlayers: capacityOf(lobby),
     round: 0,
     players,
   };
@@ -584,7 +597,7 @@ async function onJoin(event, connectionId, msg, row) {
 
   // seat cap — mid-game arrivals would be spectators, but Phase 0 has no
   // mid-game, so a full room is simply full
-  if (!onRoster && roster.length >= MAX_PLAYERS) {
+  if (!onRoster && roster.length >= capacityOf(lobby)) {
     await postTo(event, connectionId, {
       type: "join_denied",
       reason: "room_full",

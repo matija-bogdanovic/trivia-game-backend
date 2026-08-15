@@ -52,8 +52,10 @@
  * ── CONTRACT (matches the Express route exactly — do not change) ───────────
  *   Request:  GET /lobbies
  *   Response: 200 { lobbies: [{ lobbyId, code, roomName, isPrivate,
- *                               playerCount, phase, isLive, createdAt,
- *                               host, categories }] }
+ *                               playerCount, maxPlayers, phase, isLive,
+ *                               createdAt, host, categories }] }
+ *   Free seats are playerCount subtracted from maxPlayers. Rooms created
+ *   before maxPlayers existed report 6, the cap they were created under.
  *
  * ── ⚠ PARTIALLY DEGRADED vs THE EXPRESS SERVER ─────────────────────────────
  *   phase is always "lobby" and isLive always false: the Express version
@@ -128,6 +130,8 @@ function json(event, statusCode, body) {
 }
 
 const FRESH_LOBBY_MS = 60 * 60 * 1000;
+/** capacity for rooms written before `maxPlayers` was a stored field */
+const DEFAULT_MAX_PLAYERS = 6;
 
 /**
  * The single definition of an "active" lobby, shared with getActiveRooms.mjs:
@@ -140,7 +144,7 @@ async function listActiveLobbies() {
     new ScanCommand({
       TableName: LOBBIES_TABLE,
       ProjectionExpression:
-        "lobby_id, code, roomName, players, createdAt, isPrivate, #st, #cat",
+        "lobby_id, code, roomName, players, createdAt, isPrivate, #st, #cat, maxPlayers",
       ExpressionAttributeNames: { "#st": "state", "#cat": "categories" },
     })
   );
@@ -157,6 +161,9 @@ async function listActiveLobbies() {
         // the roster in DynamoDB is the only player source a Lambda has; the
         // live "connected right now" count needs the game server (Phase 2)
         playerCount: players.length,
+        // rooms created before maxPlayers existed have no attribute — 6 was
+        // the hardcoded cap they were created under, so it is the right default
+        maxPlayers: Number(l.maxPlayers ?? DEFAULT_MAX_PLAYERS),
         phase: "lobby",
         isLive: false,
         createdAt: l.createdAt ?? null,

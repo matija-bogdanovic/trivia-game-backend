@@ -122,7 +122,7 @@ async function listActiveLobbies() {
     new ScanCommand({
       TableName: LOBBIES_TABLE,
       ProjectionExpression:
-        "lobby_id, code, roomName, players, createdAt, isPrivate, #st",
+        "lobby_id, code, roomName, players, createdAt, isPrivate, #st, maxPlayers",
       ExpressionAttributeNames: { "#st": "state" },
     })
   );
@@ -133,6 +133,9 @@ async function listActiveLobbies() {
       isLive: false,
       // roster length, not live sockets — see the note in lobbies.mjs
       playerCount: Array.isArray(l.players) ? l.players.length : 0,
+      // carried for parity with lobbies.mjs; this route only returns a count,
+      // so it is not surfaced — keep it so the two stay literally in sync
+      maxPlayers: Number(l.maxPlayers ?? 6),
       createdAt: l.createdAt ?? null,
     }))
     .filter((l) => {

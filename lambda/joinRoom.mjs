@@ -76,7 +76,8 @@
  *   in-memory seat count — and only falls back to the stored roster length.
  *   A Lambda has no live count, so only the stored roster is used. A player
  *   who left mid-game without the roster being rewritten still occupies a
- *   seat here. MAX_PLAYERS (6) is unchanged.
+ *   seat here. The cap is the room's own `maxPlayers`, falling back to 6 for
+ *   rooms written before that field existed.
  *
 
  * ── ⚠ PRIVATE-ROOM PASSWORDS: bcrypt IS GONE, scrypt REPLACES IT ───────────
@@ -300,7 +301,14 @@ async function queryByKey(tableName, keyName, keyValue, indexName) {
   return res.Items ?? [];
 }
 
+/** fallback capacity for rooms written before `maxPlayers` was a stored field */
 const MAX_PLAYERS = 6;
+
+/** a room's seat count — the stored capacity, or the old hardcoded 6 */
+function capacityOf(room) {
+  const n = Math.floor(Number(room?.maxPlayers));
+  return Number.isFinite(n) && n > 0 ? n : MAX_PLAYERS;
+}
 
 // ─── handler ───────────────────────────────────────────────────────────────
 export const handler = async (event) => {
@@ -360,7 +368,7 @@ export const handler = async (event) => {
     }
 
     if (playerExists) return json(event, 200, { lobbyId: primaryKey });
-    if (players.length >= MAX_PLAYERS) {
+    if (players.length >= capacityOf(data)) {
       return json(event, 409, { message: "room_full" });
     }
     if (!id || typeof id !== "string") {
