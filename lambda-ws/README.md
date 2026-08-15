@@ -1,19 +1,84 @@
-# WebSocket API — Phase 0 setup
+# WebSocket API — setup and deployment
 
-One Lambda (`index.mjs`) behind an API Gateway **WebSocket** API, attached to
-all three of `$connect`, `$disconnect` and `$default`. Separate from the REST
-function in `lambda/` — different event shape, different response contract,
-different IAM.
+One Lambda behind an API Gateway **WebSocket** API, attached to all three of
+`$connect`, `$disconnect` and `$default`. Separate from the REST function in
+`lambda/` — different event shape, different response contract, different IAM.
 
-**Scope.** Phase 0 is the plumbing: connect, authenticated `join`, live lobby
-presence, `chat`, `leave`, `ping`. The turn engine is not here. The nine
-gameplay actions answer `{ type: "not_implemented" }` rather than failing
-silently, so a socket can be driven end-to-end and proved before any of the
-hard part is written. Why the hard part is hard:
-[`docs/websocket-game-later.md`](../docs/websocket-game-later.md).
+**Scope.** The plumbing (connect, authenticated `join`, live lobby presence,
+`chat`, `leave`, `ping`, `kick_player`) *and* the turn engine: durable match
+state on optimistic locks, a Step Functions phase scheduler, the central pot
+with accuracy-derived quotas, and the CHALLENGE / DUEL picking phase.
+`play_again`, `terminate_lobby` and the superseded guess/code duel
+(`submit_guess`, `submit_code`) still answer `{ type: "not_implemented" }`.
 
 Region `eu-west-3`, account `637423486388` throughout — the same as the REST
 stack.
+
+---
+
+## ⚠ THIS IS NO LONGER A PASTEABLE SINGLE FILE
+
+It was ~2,500 lines and 120 KB in one `index.mjs`. It is now a small entry
+point plus a `lib/` tree, and **it ships as a multi-file zip from the CLI**.
+The console's inline editor cannot paste a directory, so the paste workflow
+described further down applies only to the *configuration* steps — never to the
+code.
+
+```
+lambda-ws/
+  index.mjs                 the router: event → handler. Lambda handler stays index.handler
+  lib/
+    config.mjs              every tunable number, every phase clock, the env vars
+    aws.mjs                 the shared DynamoDB document client
+    auth.mjs                Cognito access-token verification + scrypt room passwords
+    connections.mjs         Connections table, postToConnection, lobby fan-out
+    lobbies.mjs             Lobbies + Wallets reads
+    state.mjs               match state: shape, serialisation, the version lock
+    questions.mjs           the pool, the deck, generated arithmetic
+    turn.mjs                the phase stamp, the living-player list, the weighted wheel
+    pot.mjs                 who may bet, the accuracy-derived quotas, settlement
+    phases.mjs              the phase machine: spin, question, betting, duel,
+                            picking, reveal, gameover
+    scheduler.mjs           the Step Functions phase timer + the deadline entry point
+    messages.mjs            phase messages and the system chat line
+    presence.mjs            lobby_state
+    handlers/
+      connect.mjs           $connect, $disconnect
+      join.mjs              join
+      chat.mjs              chat
+      room.mjs              leave, close, the host gate, kick_player
+      game.mjs              start_game, submit_answer, place_bet, pick_player
+```
+
+The dependency graph is acyclic and points one way — handlers → phases → pot →
+turn → config, and handlers → state / messages / scheduler → connections →
+config. Nothing in `lib/` imports a handler, and
+nothing imports `index.mjs`. **Every import is relative** (`./lib/…`,
+`../config.mjs`) so it resolves inside the zip exactly as it does on disk; the
+same pattern the REST function's multi-file zip uses.
+
+### Deploying a code change
+
+```sh
+cd lambda-ws
+zip -qr /tmp/ws.zip index.mjs lib
+aws lambda update-function-code \
+  --region eu-west-3 --function-name ipakSeOkreceWS \
+  --zip-file fileb:///tmp/ws.zip
+```
+
+Zip from **inside** `lambda-ws/` so the archive root holds `index.mjs` and
+`lib/` with no wrapping folder — a wrapped path makes the runtime fail to find
+`index.handler`. Verify a deploy landed:
+
+```sh
+aws lambda get-function-configuration --region eu-west-3 \
+  --function-name ipakSeOkreceWS --query '{Handler:Handler,Sha:CodeSha256}'
+```
+
+A module-resolution mistake inside the zip does not surface as a nice error —
+the socket opens and the handler never answers. So after any deploy, send a
+`ping` and confirm the `pong` before assuming it worked.
 
 ---
 
@@ -32,7 +97,7 @@ Sequence:
 | # | Where | What |
 |---|-------|------|
 | 1 | DynamoDB | create the `Connections` table + `lobby-index` GSI + TTL |
-| 2 | Lambda | create `ipakseokrece-ws`, paste `index.mjs` |
+| 2 | Lambda | create `ipakseokrece-ws`, upload the `index.mjs` + `lib/` zip |
 | 3 | **the wizard tab** | attach that function to all three routes |
 | 4 | the wizard tab | stage `prod` → Create and deploy → copy the `wss://` URL |
 | 5 | IAM | attach `iam-policy.json` (needs the API id from step 4) |
@@ -93,10 +158,11 @@ betting window.
 
 Then:
 
-1. **Code** tab → open `index.mjs` → select all → paste the contents of
-   `lambda-ws/index.mjs` → **Deploy**.
-   One file, no zip, no dependencies — everything it imports ships in the
-   runtime.
+1. **Code** — do NOT paste. Upload the multi-file zip built as shown at the top
+   of this file (`zip -qr /tmp/ws.zip index.mjs lib` from inside `lambda-ws/`,
+   then `aws lambda update-function-code`). Console → **Upload from → .zip
+   file** works too. Handler stays `index.handler`. No dependencies to install
+   — everything it imports ships in the runtime.
 2. **Configuration → General configuration → Edit:**
    - **Memory:** `256 MB`
    - **Timeout:** `10 sec`
