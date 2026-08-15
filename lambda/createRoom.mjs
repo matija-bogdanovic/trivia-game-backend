@@ -60,7 +60,10 @@
  * ── CONTRACT (matches the Express route exactly — do not change) ───────────
  *   Request:  POST /createRoom
  *             { "roomName": "...", "playerId": "...",
- *               "isPrivate"?: bool, "password"?: "..." (4+ chars if private) }
+ *               "isPrivate"?: bool, "password"?: "..." (4+ chars if private),
+ *               "categories"?: ["Science","History"] — array of strings;
+ *                              missing or empty stores ["Mixed"], a non-array
+ *                              or a non-string element answers 400 }
  *   Response: 200 { message: "Room created", roomCode, lobbyId, creditsLeft }
  *             400 { error: "Missing required fields" }
  *             400 { error: "Private rooms need a password (4+ characters)" }
@@ -381,6 +384,27 @@ function scryptVerify(password, stored) {
   return key.length === expected.length && crypto.timingSafeEqual(key, expected);
 }
 
+// ─── question categories ───────────────────────────────────────────────────
+const DEFAULT_CATEGORIES = ["Mixed"];
+const MAX_CATEGORIES = 12;
+
+/**
+ * Normalises the `categories` field off the request body.
+ *   missing / null / empty  -> ["Mixed"]
+ *   array of strings        -> trimmed, de-duplicated, capped
+ *   anything else           -> null, which the caller turns into a 400
+ */
+function normalizeCategories(raw) {
+  if (raw === undefined || raw === null) return DEFAULT_CATEGORIES;
+  if (!Array.isArray(raw)) return null;
+  if (raw.some((c) => typeof c !== "string")) return null;
+  const cleaned = [...new Set(raw.map((c) => c.trim()).filter(Boolean))].slice(
+    0,
+    MAX_CATEGORIES
+  );
+  return cleaned.length ? cleaned : DEFAULT_CATEGORIES;
+}
+
 // ─── handler ───────────────────────────────────────────────────────────────
 export const handler = async (event) => {
   // CORS preflight, when API Gateway is not answering it for us
@@ -402,9 +426,15 @@ export const handler = async (event) => {
   }
 
   try {
-    const { playerId, roomName, isPrivate, password } = body;
+    const { playerId, roomName, isPrivate, password, categories } = body;
     if (!roomName) {
       return json(event, 400, { error: "Missing required fields" });
+    }
+    const roomCategories = normalizeCategories(categories);
+    if (roomCategories === null) {
+      return json(event, 400, {
+        error: "categories must be an array of strings",
+      });
     }
     const roomIsPrivate = Boolean(isPrivate);
     if (roomIsPrivate) {
@@ -439,6 +469,7 @@ export const handler = async (event) => {
           roomName: String(roomName),
           code: Number(roomCode),
           isPrivate: roomIsPrivate,
+          categories: roomCategories,
           ...(passwordHash ? { passwordHash } : {}),
           players: [
             {

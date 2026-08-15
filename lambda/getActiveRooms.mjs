@@ -131,12 +131,14 @@ async function listActiveLobbies() {
     .map((l) => ({
       phase: "lobby",
       isLive: false,
-      playerCount: 0,
+      // roster length, not live sockets — see the note in lobbies.mjs
+      playerCount: Array.isArray(l.players) ? l.players.length : 0,
       createdAt: l.createdAt ?? null,
     }))
     .filter((l) => {
       if (l.phase !== "lobby" && l.phase !== "countdown") return false;
-      if (l.isLive && l.playerCount > 0) return true;
+      // a room with a roster never ages out; only EMPTY rooms do
+      if (l.playerCount > 0) return true;
       const age = Date.now() - new Date(l.createdAt ?? 0).getTime();
       return age < FRESH_LOBBY_MS;
     })

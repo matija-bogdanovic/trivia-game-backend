@@ -52,17 +52,25 @@
  * ── CONTRACT (matches the Express route exactly — do not change) ───────────
  *   Request:  GET /lobbies
  *   Response: 200 { lobbies: [{ lobbyId, code, roomName, isPrivate,
- *                               playerCount, phase, isLive, createdAt }] }
+ *                               playerCount, phase, isLive, createdAt,
+ *                               host, categories }] }
  *
- * ── ⚠ DEGRADED vs THE EXPRESS SERVER ───────────────────────────────────────
- *   playerCount is always 0, phase always "lobby" and isLive always false.
- *   The Express version fills these from getLiveRoomSummaries(), the live
- *   WebSocket room map in the game server's memory, which a Lambda cannot
- *   see. The knock-on effect is the filter: Express keeps a lobby if it has
- *   connected players OR was created in the last hour; here only the
- *   created-in-the-last-hour arm can ever be true, so a busy lobby older
- *   than an hour disappears from the list. Sort order and the 20-item cap
- *   are unchanged. See docs/websocket-game-later.md.
+ * ── ⚠ PARTIALLY DEGRADED vs THE EXPRESS SERVER ─────────────────────────────
+ *   phase is always "lobby" and isLive always false: the Express version
+ *   fills those from getLiveRoomSummaries(), the live WebSocket room map in
+ *   the game server's memory, which a Lambda cannot see.
+ *
+ *   playerCount is NOT degraded any more. It is the length of the `players`
+ *   roster in DynamoDB — everyone who joined through POST /joinRoom. That
+ *   differs from the Express number, which counts sockets connected RIGHT
+ *   NOW; a player who joined and closed their tab still counts here.
+ *
+ *   The filter follows from that: a room with a non-empty roster stays
+ *   listed regardless of age, and only EMPTY rooms age out after an hour.
+ *   Previously the "has players" arm was gated on isLive, which is always
+ *   false here, so a room full of players vanished an hour after creation.
+ *   Sort order and the 20-item cap are unchanged.
+ *   See docs/websocket-game-later.md.
  *
  * Ported from: lobbiesHandler + listActiveLobbies in src/server/apis/economy.ts
  * ===========================================================================
@@ -132,25 +140,38 @@ async function listActiveLobbies() {
     new ScanCommand({
       TableName: LOBBIES_TABLE,
       ProjectionExpression:
-        "lobby_id, code, roomName, players, createdAt, isPrivate, #st",
-      ExpressionAttributeNames: { "#st": "state" },
+        "lobby_id, code, roomName, players, createdAt, isPrivate, #st, #cat",
+      ExpressionAttributeNames: { "#st": "state", "#cat": "categories" },
     })
   );
   return (scan.Items ?? [])
     .filter((l) => l.state !== "finished")
-    .map((l) => ({
-      lobbyId: String(l.lobby_id),
-      code: Number(l.code),
-      roomName: l.roomName ?? `Room ${l.code}`,
-      isPrivate: Boolean(l.isPrivate),
-      playerCount: 0,
-      phase: "lobby",
-      isLive: false,
-      createdAt: l.createdAt ?? null,
-    }))
+    .map((l) => {
+      const players = Array.isArray(l.players) ? l.players : [];
+      const host = players.find((p) => p?.role === "Admin");
+      return {
+        lobbyId: String(l.lobby_id),
+        code: Number(l.code),
+        roomName: l.roomName ?? `Room ${l.code}`,
+        isPrivate: Boolean(l.isPrivate),
+        // the roster in DynamoDB is the only player source a Lambda has; the
+        // live "connected right now" count needs the game server (Phase 2)
+        playerCount: players.length,
+        phase: "lobby",
+        isLive: false,
+        createdAt: l.createdAt ?? null,
+        host: host ? String(host.player) : null,
+        categories: Array.isArray(l.categories)
+          ? l.categories.map(String)
+          : ["Mixed"],
+      };
+    })
     .filter((l) => {
       if (l.phase !== "lobby" && l.phase !== "countdown") return false;
-      if (l.isLive && l.playerCount > 0) return true;
+      // a room with a roster stays listed however old it is — it is only
+      // EMPTY rooms that age out. Keying this off isLive (always false here)
+      // is what used to make a busy room vanish an hour after creation.
+      if (l.playerCount > 0) return true;
       const age = Date.now() - new Date(l.createdAt ?? 0).getTime();
       return age < FRESH_LOBBY_MS;
     })
