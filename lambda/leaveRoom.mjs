@@ -74,6 +74,7 @@ import crypto from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
+  DeleteCommand,
   QueryCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
@@ -266,12 +267,34 @@ export const handler = async (event) => {
     }
 
     const isAdmin = leavingPlayer.role === "Admin";
-    const updatedPlayers = room.players.filter((p) => p.player !== username);
 
-    // if the admin leaves, the next player inherits the room
-    if (isAdmin && updatedPlayers.length > 0) {
-      updatedPlayers[0] = { ...updatedPlayers[0], role: "Admin" };
+    // THE HOST LEAVING CLOSES THE ROOM. The room does not survive its host and
+    // is not inherited by the next player — deleting the item is what makes it
+    // vanish from GET /lobbies and stops anyone joining a hostless room.
+    //
+    // The WS `leave` handler is what tells the other players (it broadcasts
+    // room_closed); this route cannot, because posting to a WebSocket
+    // connection needs execute-api:ManageConnections on the *other* API. The
+    // frontend's leaveRoom() sends the WS `leave` AND calls this route, so
+    // both halves run. Each is idempotent and order-independent: deleting an
+    // already-deleted item succeeds, and the broadcast reads Connections, not
+    // Lobbies.
+    if (isAdmin) {
+      await ddb.send(
+        new DeleteCommand({
+          TableName: LOBBIES_TABLE,
+          Key: { lobby_id: String(room.lobby_id) },
+        })
+      );
+      return json(event, 200, {
+        message: "Room closed",
+        player: username,
+        roomClosed: true,
+        reason: "host_left",
+      });
     }
+
+    const updatedPlayers = room.players.filter((p) => p.player !== username);
 
     await ddb.send(
       new UpdateCommand({
@@ -285,6 +308,7 @@ export const handler = async (event) => {
     return json(event, 200, {
       message: "User removed from room",
       player: username,
+      roomClosed: false,
     });
   } catch (err) {
     console.error("Error in leaveRoom:", err);

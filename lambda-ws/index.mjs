@@ -13,7 +13,8 @@
  *
  * ┌── WHAT THIS DOES, AND WHAT IT DOES NOT ─────────────────────────────────┐
  * │ DOES:     connect/disconnect bookkeeping, authenticated `join`, live    │
- * │           lobby presence (`lobby_state`), `chat`, `leave`, `ping`.      │
+ * │           lobby presence (`lobby_state`), `chat`, `leave`, `ping`,      │
+ * │           and host-leaves-closes-the-room (`room_closed`).              │
  * │ DOES NOT: the turn engine. `start_game`, `submit_answer`, `place_bet`,  │
  * │           `pick_player`, `submit_guess`, `submit_code`, `play_again`,   │
  * │           `kick_player`, `terminate_lobby` all answer                   │
@@ -43,8 +44,10 @@
  *     execute-api:ManageConnections on  <ws-api-id>/<stage>/POST/@connections/*
  *     dynamodb R/W                 on  table/Connections
  *     dynamodb:Query               on  table/Connections/index/lobby-index
- *   It also needs GetItem on Lobbies and Query on Lobbies/index/code-index,
- *   which the REST policy does not currently grant.
+ *   It also needs GetItem + DeleteItem on Lobbies and Query on
+ *   Lobbies/index/code-index. DeleteItem is what lets a host closing the room
+ *   actually delete it — without it the room_closed broadcast still goes out
+ *   and the room silently survives.
  *
  * ── HOW TO ATTACH ─────────────────────────────────────────────────────────
  *   API Gateway → WebSocket API → route selection expression  $request.body.type
@@ -491,6 +494,21 @@ async function onConnect(event) {
  * $disconnect — best effort, and API Gateway ignores whatever we return. The
  * row goes first so a failed broadcast cannot leave a ghost behind; the TTL
  * attribute is the backstop for the invocations that never happen at all.
+ *
+ * ⚠ A HOST DISCONNECT DOES **NOT** CLOSE THE ROOM — deliberately.
+ *   $disconnect cannot tell "the host quit" from "the host locked their
+ *   phone", "the tunnel blipped", "API Gateway hit its 10-minute idle
+ *   timeout" or "the connection hit its 2-hour maximum duration". All four
+ *   arrive here identically, and there is no in-process grace timer on
+ *   Lambda to wait out a reconnect the way the Express server's 60s
+ *   EMPTY_ROOM_GRACE_MS does. Closing on any of them would let a host lose
+ *   their room by backgrounding a browser tab.
+ *
+ *   So a disconnecting host is reported as simply not connected, and the
+ *   reassignHost fallback in lobbyStateMessage() hands the start button to
+ *   whoever is present until they come back. Deleting the room is reserved
+ *   for the two paths that carry real intent: the `leave` message below and
+ *   POST /leaveRoom.
  */
 async function onDisconnect(event) {
   const connectionId = event.requestContext.connectionId;
@@ -683,14 +701,59 @@ async function onChat(event, connectionId, msg, row) {
 }
 
 /**
- * leave — presence only, so it belongs to Phase 0 even though the Express
- * version also removes the player from the running match. The client sends
- * this and then closes the socket; doing it here means the rest of the lobby
- * sees them go immediately rather than waiting for $disconnect.
+ * Close a room for good: tell everyone first, then tear down.
+ *
+ * Order matters. The room_closed broadcast goes out BEFORE the Lobbies item
+ * and the Connections rows are deleted, because the fan-out reads the
+ * lobby-index to find who to tell — reap first and there is nobody left to
+ * notify.
+ *
+ * The sockets themselves are left open. room_closed is the client's cue to
+ * navigate away; forcibly closing the connection would deny it the chance to
+ * show anything. Their Connections rows go, so nothing is bound to a room
+ * that no longer exists — and because `join` writes with UpdateCommand, a
+ * client that joins somewhere else simply recreates its row.
+ */
+async function closeRoom(event, lobbyId, reason) {
+  await broadcast(event, lobbyId, { type: "room_closed", reason });
+
+  await ddb.send(
+    new DeleteCommand({ TableName: LOBBIES_TABLE, Key: { lobby_id: lobbyId } })
+  );
+
+  const rows = await connectionsInLobby(lobbyId);
+  await Promise.all(
+    rows.map((r) => deleteConnection(r.connectionId).catch(() => {}))
+  );
+}
+
+/** is this connection's user the room's Admin? */
+async function isHostOf(lobby, username) {
+  if (!username || !Array.isArray(lobby?.players)) return false;
+  const host = lobby.players.find((p) => p?.role === "Admin");
+  return Boolean(host && String(host.player) === username);
+}
+
+/**
+ * leave — an explicit, intentional departure.
+ *
+ * WHEN THE HOST LEAVES, THE ROOM IS DELETED. This takes precedence over the
+ * reassignHost fallback in lobbyStateMessage(): that fallback exists so a
+ * lobby is not stranded without a start button while the host is briefly
+ * away, which is a different situation from the host deliberately leaving.
+ * Since the room is gone, the fallback never gets the chance to run.
+ *
+ * A non-host leaving is presence-only, exactly as before.
  */
 async function onLeave(event, connectionId, row) {
   if (!row?.lobbyId) return;
   const lobbyId = row.lobbyId;
+
+  const lobby = await resolveLobby(lobbyId);
+  if (await isHostOf(lobby, row.username)) {
+    await closeRoom(event, lobbyId, "host_left");
+    return;
+  }
   await ddb.send(
     new UpdateCommand({
       TableName: CONNECTIONS_TABLE,

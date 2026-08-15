@@ -39,7 +39,12 @@
     {
       "Sid": "LobbiesTable",
       "Effect": "Allow",
-      "Action": ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Scan"],
+      "Action": [
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:Scan",
+        "dynamodb:DeleteItem"
+      ],
       "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Lobbies"
     },
     {

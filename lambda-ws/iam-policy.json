@@ -37,9 +37,9 @@
       "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Connections/index/lobby-index"
     },
     {
-      "Sid": "LobbiesTableRead",
+      "Sid": "LobbiesTableReadAndClose",
       "Effect": "Allow",
-      "Action": "dynamodb:GetItem",
+      "Action": ["dynamodb:GetItem", "dynamodb:DeleteItem"],
       "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Lobbies"
     },
     {
