@@ -77,17 +77,35 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
+  ScanCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 import {
   ApiGatewayManagementApiClient,
   PostToConnectionCommand,
 } from "@aws-sdk/client-apigatewaymanagementapi";
+import {
+  SFNClient,
+  StartExecutionCommand,
+  StopExecutionCommand,
+} from "@aws-sdk/client-sfn";
 
 // ─── config ────────────────────────────────────────────────────────────────
 const REGION = process.env.AWS_REGION || "eu-west-3";
 const CONNECTIONS_TABLE = process.env.CONNECTIONS_TABLE || "Connections";
 const GAME_STATE_TABLE = process.env.GAME_STATE_TABLE || "GameState";
+const QUESTIONS_TABLE = process.env.QUESTIONS_TABLE || "Questions";
+const PHASE_TIMER_ARN =
+  process.env.PHASE_TIMER_ARN ||
+  "arn:aws:states:eu-west-3:637423486388:stateMachine:ipakSeOkrecePhaseTimer";
+/**
+ * Where postToConnection sends. A WebSocket invocation derives this from its
+ * own event; a Step Functions invocation has no requestContext, so the timer
+ * path needs it configured.
+ */
+const WS_ENDPOINT =
+  process.env.WS_ENDPOINT ||
+  "https://j803en0pf7.execute-api.eu-west-3.amazonaws.com/prod";
 const LOBBY_INDEX = process.env.CONNECTIONS_LOBBY_INDEX || "lobby-index";
 const LOBBIES_TABLE = process.env.LOBBIES_TABLE || "Lobbies";
 const WALLETS_TABLE = process.env.WALLETS_TABLE || "Wallets";
@@ -132,6 +150,12 @@ const REVEAL_MS = 5000;
 const PICK_TIME_MS = 15000;
 const DUEL_TIME_MS = 20000;
 const CODE_DUEL_TIME_MS = 90000;
+
+// ─── scoring constants, also from room.ts ──────────────────────────────────
+/** share of questions that are generated arithmetic rather than deck draws */
+const MATH_QUESTION_CHANCE = 0.3;
+/** what a wrong answer or a timeout costs the answerer */
+const WRONG_ANSWER_COST = 100;
 
 /** a question's clock shrinks as the chain deepens (room.ts askQuestion) */
 function questionTimeFor(chainDepth) {
@@ -178,9 +202,7 @@ const STATE_MAX_ATTEMPTS = 5;
  * dispatched before this set is consulted.
  */
 const TURN_ENGINE_ACTIONS = new Set([
-  "submit_answer",
   "place_bet",
-  "pick_player",
   "submit_guess",
   "submit_code",
   "play_again",
@@ -295,10 +317,14 @@ function scryptVerify(password, stored) {
 const managementClients = new Map();
 
 function managementClientFor(event) {
-  const { domainName, stage } = event.requestContext;
+  const domainName = event?.requestContext?.domainName;
+  const stage = event?.requestContext?.stage;
   // a custom domain already carries its own base path; the default
-  // execute-api domain needs the stage appended
-  const endpoint = `https://${domainName}/${stage}`;
+  // execute-api domain needs the stage appended. A phase-timer invocation
+  // arrives from Step Functions with no requestContext at all, so it falls
+  // back to the configured endpoint.
+  const endpoint =
+    domainName && stage ? `https://${domainName}/${stage}` : WS_ENDPOINT;
   let client = managementClients.get(endpoint);
   if (!client) {
     client = new ApiGatewayManagementApiClient({ region: REGION, endpoint });
@@ -519,7 +545,12 @@ function initialGameState(lobby, lobbyId, connRows) {
     minPlayers: MIN_PLAYERS,
 
     phase: "countdown",
+    // phaseSeq must exist from the very first phase: the scheduler's guard
+    // compares against it, and an undefined here makes the first timer think
+    // it is stale and exit, leaving the match parked in countdown forever
+    phaseSeq: 1,
     phaseEndsAt: now + COUNTDOWN_MS,
+    executionArn: null,
     round: 0,
     chainDepth: 0,
     pot: 0,
@@ -669,6 +700,467 @@ async function mutateGameState(lobbyId, mutate) {
     }
   }
   return { ok: false, reason: "contended" };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// QUESTIONS — ported from src/server/game/questions.ts
+// ═══════════════════════════════════════════════════════════════════════════
+
+function shuffle(items) {
+  const arr = [...items];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function randInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+let mathCounter = 0;
+/** generated arithmetic, harder tiers get harder forms (questions.ts) */
+function generateMathQuestion(difficulty) {
+  let text, answer;
+  if (difficulty <= 1) {
+    const a = randInt(3, 60), b = randInt(2, 40);
+    if (Math.random() < 0.5) { text = `${a} + ${b} = ?`; answer = a + b; }
+    else { const [hi, lo] = a >= b ? [a, b] : [b, a]; text = `${hi} - ${lo} = ?`; answer = hi - lo; }
+  } else if (difficulty === 2) {
+    if (Math.random() < 0.5) {
+      const a = randInt(3, 12), b = randInt(3, 12);
+      text = `${a} × ${b} = ?`; answer = a * b;
+    } else {
+      const b = randInt(2, 12), q = randInt(2, 12);
+      text = `${b * q} ÷ ${b} = ?`; answer = q;
+    }
+  } else {
+    const form = randInt(0, 2), a = randInt(2, 9), b = randInt(2, 9), c = randInt(2, 9);
+    if (form === 0) { text = `${a} + ${b} × ${c} = ?`; answer = a + b * c; }
+    else if (form === 1) { text = `(${a} + ${b}) × ${c} = ?`; answer = (a + b) * c; }
+    else { const x = randInt(2, 12); text = `${a}x + ${b} = ${a * x + b}, x = ?`; answer = x; }
+  }
+  const options = new Set([answer]);
+  while (options.size < 4) {
+    const spread = Math.max(2, Math.round(Math.abs(answer) / 5));
+    const candidate = answer + (Math.random() < 0.5 ? -1 : 1) * randInt(1, spread + 2);
+    if (candidate !== answer && candidate >= 0) options.add(candidate);
+  }
+  return {
+    id: `math-${++mathCounter}`,
+    text,
+    options: shuffle([...options].map(String)),
+    answer: String(answer),
+    difficulty: Math.min(3, Math.max(1, difficulty)),
+  };
+}
+
+/** the same tolerant normaliser questions.ts uses */
+function normalizeQuestion(raw, fallbackId) {
+  if (!raw || typeof raw.question_text !== "string") return null;
+  const rawOptions = Array.isArray(raw.question_options) ? raw.question_options : [];
+  const options = rawOptions
+    .map((o) => (typeof o === "string" ? o : o?.question_option_text ?? null))
+    .filter((o) => typeof o === "string" && o.length > 0);
+  const answer = typeof raw.answer === "string" ? raw.answer : null;
+  if (options.length < 2 || !answer || !options.includes(answer)) return null;
+  const difficulty = Number(raw.difficulty);
+  return {
+    id: String(raw.question_id ?? fallbackId),
+    text: raw.question_text,
+    options,
+    answer,
+    difficulty: difficulty >= 1 && difficulty <= 3 ? Math.round(difficulty) : 1,
+  };
+}
+
+// cached at module scope: a warm container scans the table once, not per turn
+let questionPool = null;
+async function loadQuestionPool() {
+  if (questionPool) return questionPool;
+  const res = await ddb.send(new ScanCommand({ TableName: QUESTIONS_TABLE }));
+  const list = (res.Items ?? [])
+    .map((item, i) => normalizeQuestion(item, `db-${i}`))
+    .filter(Boolean);
+  questionPool = { byId: new Map(list.map((q) => [q.id, q])), ids: list.map((q) => q.id) };
+  return questionPool;
+}
+
+/**
+ * Draw for the requested tier. The deck persists as id lists on the state so a
+ * match does not repeat a question until the pool is exhausted; the drawn
+ * question itself is copied into `turn` so nothing has to be re-resolved.
+ */
+function drawQuestion(state, difficulty, pool) {
+  if (Math.random() < MATH_QUESTION_CHANCE) return generateMathQuestion(difficulty);
+  if (!state.deck) state.deck = { fresh: [], used: [] };
+  if (!state.deck.fresh.length) {
+    state.deck.fresh = shuffle(state.deck.used);
+    state.deck.used = [];
+  }
+  if (!state.deck.fresh.length) return generateMathQuestion(difficulty);
+
+  const want = Math.min(3, Math.max(1, difficulty));
+  const at = (d) => state.deck.fresh.findIndex((id) => pool.byId.get(id)?.difficulty === d);
+  let idx = at(want);
+  if (idx < 0) idx = at(want - 1);
+  if (idx < 0) idx = 0;
+  const [id] = state.deck.fresh.splice(idx, 1);
+  state.deck.used.push(id);
+  return pool.byId.get(id) ?? generateMathQuestion(difficulty);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE ROUND LOOP
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Every phase change goes through here. `phaseSeq` is what makes the scheduler
+ * idempotent: a timer carries the seq it was armed for, and a timer whose seq
+ * no longer matches the state is one whose phase already moved on — it exits
+ * without touching anything.
+ */
+function setPhase(state, phase, durationMs) {
+  state.phase = phase;
+  state.phaseSeq = Number(state.phaseSeq ?? 0) + 1;
+  state.phaseEndsAt = nowMs() + durationMs;
+  return state;
+}
+
+const livingPlayers = (s) => (s.players ?? []).filter((p) => p.alive && !p.isSpectator);
+
+/**
+ * SPIN WEIGHTS — Matija's decaying model.
+ *
+ *   picked      w := max(MIN, w * PICKED_DECAY)     0.35×, floored at 0.15
+ *   everyone    w := min(MAX, w * RECOVERY)         1.25×, capped at 2.5
+ *   else
+ *
+ * The floor is the whole point: a just-picked player's weight drops hard but
+ * never reaches zero, so an immediate re-pick stays possible — just unlikely.
+ * The cap stops someone ignored for ten spins becoming a certainty. Weights
+ * are persisted per player, so unlike room.ts's single `lastSpinTarget` the
+ * distribution remembers the whole match, and a player skipped repeatedly
+ * climbs while the recently-picked sink.
+ */
+function applySpinWeights(state, pickedUsername) {
+  for (const p of state.players ?? []) {
+    if (!p.alive || p.isSpectator) continue;
+    const w = Number(p.spinWeight ?? SPIN_WEIGHT_INITIAL);
+    const next =
+      p.username === pickedUsername
+        ? Math.max(SPIN_WEIGHT_MIN, w * SPIN_WEIGHT_PICKED_DECAY)
+        : Math.min(SPIN_WEIGHT_MAX, w * SPIN_WEIGHT_RECOVERY);
+    // keep the stored numbers tidy — DynamoDB happily persists float drift
+    p.spinWeight = Math.round(next * 1e6) / 1e6;
+  }
+}
+
+function weightedPick(alive) {
+  const w = (p) => Math.max(SPIN_WEIGHT_MIN, Number(p.spinWeight ?? SPIN_WEIGHT_INITIAL));
+  const total = alive.reduce((sum, p) => sum + w(p), 0);
+  let roll = Math.random() * total;
+  for (const p of alive) {
+    roll -= w(p);
+    if (roll <= 0) return p;
+  }
+  return alive[alive.length - 1];
+}
+
+function enterGameOver(state) {
+  const ranked = [...(state.players ?? [])]
+    .filter((p) => !p.isSpectator)
+    .sort((a, b) => (a.alive !== b.alive ? (a.alive ? -1 : 1) : b.money - a.money));
+  state.winner = ranked[0]?.username ?? null;
+  state.turn = null;
+  state.currentSpin = null;
+  state.currentPick = null;
+  setPhase(state, "gameover", 0);
+  state.phaseEndsAt = 0;
+  return state;
+}
+
+/** the wheel: decide the FINAL target up front, then animate for 5s */
+function enterSpin(state) {
+  const alive = livingPlayers(state);
+  if (alive.length <= 1) return enterGameOver(state);
+
+  state.chainDepth = 0;
+  const target = weightedPick(alive);
+  applySpinWeights(state, target.username);
+  state.lastSpinTarget = target.username;
+  state.turn = null;
+  state.currentPick = null;
+  setPhase(state, "spin", SPIN_TIME_MS);
+  state.currentSpin = {
+    target: target.username,
+    startedAt: nowMs(),
+    endsAt: state.phaseEndsAt,
+  };
+  return state;
+}
+
+function enterQuestion(state, username, pool) {
+  const player = (state.players ?? []).find((p) => p.username === username);
+  if (!player || !player.alive) return enterSpin(state);
+
+  state.round = Number(state.round ?? 0) + 1;
+  // room.ts credits the round to everyone still standing (creditRound)
+  for (const p of livingPlayers(state)) {
+    p.stats = p.stats ?? { correct: 0, wrong: 0, betsWon: 0, maxBetWin: 0, roundsPlayed: 0 };
+    p.stats.roundsPlayed = Number(p.stats.roundsPlayed ?? 0) + 1;
+  }
+
+  const difficulty = Math.min(3, Math.max(1, 1 + Math.floor(Number(state.chainDepth ?? 0) / 2)));
+  const answerTimeMs = questionTimeFor(Number(state.chainDepth ?? 0));
+  state.turn = {
+    answering: username,
+    question: drawQuestion(state, difficulty, pool),
+    askedAt: nowMs(),
+    answerTimeMs,
+    answer: null,
+    answeredInMs: null,
+    correct: null,
+    timedOut: null,
+    answererDelta: 0,
+  };
+  state.currentSpin = null;
+  state.currentPick = null;
+  setPhase(state, "question", answerTimeMs);
+  return state;
+}
+
+/** resolve the turn: correctness, stats, money. P2.2 settles the pot here. */
+function enterReveal(state) {
+  const t = state.turn;
+  if (!t) return enterSpin(state);
+
+  const timedOut = t.answer === null || t.answer === undefined;
+  const correct = !timedOut && t.answer === t.question?.answer;
+  t.timedOut = timedOut;
+  t.correct = correct;
+
+  const player = (state.players ?? []).find((p) => p.username === t.answering);
+  if (player) {
+    player.stats = player.stats ?? { correct: 0, wrong: 0, betsWon: 0, maxBetWin: 0, roundsPlayed: 0 };
+    if (correct) {
+      player.stats.correct = Number(player.stats.correct ?? 0) + 1;
+    } else {
+      player.stats.wrong = Number(player.stats.wrong ?? 0) + 1;
+      const delta = -Math.min(WRONG_ANSWER_COST, player.money);
+      player.money = Math.max(0, player.money + delta);
+      t.answererDelta = delta;
+    }
+  }
+
+  // elimination wiring — P2.4 finalises standings and persistence
+  state.eliminated = [];
+  for (const p of state.players ?? []) {
+    if (p.alive && p.money <= 0) {
+      p.money = 0;
+      p.alive = false;
+      state.eliminated.push(p.username);
+    }
+  }
+
+  setPhase(state, "reveal", REVEAL_MS);
+  return state;
+}
+
+/** correct → the answerer picks the next victim; wrong → back to the wheel */
+function afterReveal(state, pool) {
+  if (livingPlayers(state).length <= 1) return enterGameOver(state);
+
+  const t = state.turn;
+  const answerer = t ? (state.players ?? []).find((p) => p.username === t.answering) : null;
+  if (t?.correct && answerer?.alive) {
+    const choices = livingPlayers(state)
+      .filter((p) => p.username !== t.answering)
+      .map((p) => p.username);
+    if (choices.length === 1) {
+      state.chainDepth = Number(state.chainDepth ?? 0) + 1;
+      return enterQuestion(state, choices[0], pool);
+    }
+    setPhase(state, "picking", PICK_TIME_MS);
+    state.currentPick = { picker: t.answering, choices, endsAt: state.phaseEndsAt };
+    return state;
+  }
+  return enterSpin(state);
+}
+
+/** what a fired deadline does, per phase */
+function advanceOnDeadline(state, pool) {
+  switch (state.phase) {
+    case "countdown":
+      return enterSpin(state);
+    case "spin":
+      return enterQuestion(state, state.currentSpin?.target, pool);
+    case "question":
+      return enterReveal(state);
+    case "reveal":
+      return afterReveal(state, pool);
+    case "picking": {
+      const choices = state.currentPick?.choices ?? [];
+      if (!choices.length) return enterSpin(state);
+      const target = choices[Math.floor(Math.random() * choices.length)];
+      state.chainDepth = Number(state.chainDepth ?? 0) + 1;
+      return enterQuestion(state, target, pool);
+    }
+    default:
+      return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE SCHEDULER
+// ═══════════════════════════════════════════════════════════════════════════
+const sfn = new SFNClient({ region: REGION });
+/** a fired timer this far before its deadline is early — re-arm, don't advance */
+const TIMER_TOLERANCE_MS = 400;
+
+async function startPhaseTimer(lobbyId, phaseSeq, phaseEndsAt) {
+  const res = await sfn.send(
+    new StartExecutionCommand({
+      stateMachineArn: PHASE_TIMER_ARN,
+      input: JSON.stringify({
+        source: "phase-timer",
+        lobbyId,
+        phaseSeq,
+        waitUntil: new Date(phaseEndsAt).toISOString(),
+      }),
+    })
+  );
+  return res.executionArn;
+}
+
+async function stopPhaseTimer(executionArn) {
+  if (!executionArn) return;
+  try {
+    await sfn.send(new StopExecutionCommand({ executionArn }));
+  } catch (err) {
+    // already finished, or never existed — the phaseSeq guard covers us anyway
+    console.warn("stopExecution failed (harmless)", err?.name);
+  }
+}
+
+/**
+ * Re-arm after a transition driven by a PLAYER rather than a deadline.
+ *
+ * The running execution is asleep on the old deadline, so it is stopped and a
+ * fresh one started. If the stop loses the race and the old execution fires
+ * anyway, its phaseSeq no longer matches and it exits without acting — the
+ * guard is what makes this safe rather than the stop.
+ *
+ * Runs AFTER the state write commits, then persists the new ARN in a second
+ * write. That second write bumps `version` but not `phaseSeq`, so it cannot
+ * invalidate the timer it just armed.
+ */
+async function rearmPhaseTimer(state, previousExecutionArn) {
+  await stopPhaseTimer(previousExecutionArn);
+  if (state.phase === "gameover") {
+    await mutateGameState(state.lobbyId, (s) => { s.executionArn = null; return s; });
+    return;
+  }
+  const arn = await startPhaseTimer(state.lobbyId, state.phaseSeq, state.phaseEndsAt);
+  await mutateGameState(state.lobbyId, (s) => { s.executionArn = arn; return s; });
+}
+
+/** the phase-specific message that rides alongside game_state */
+function phaseMessage(state) {
+  switch (state.phase) {
+    case "spin":
+      return {
+        type: "spin",
+        target: state.currentSpin?.target,
+        spinTimeMs: Math.max(0, Number(state.phaseEndsAt) - nowMs()),
+      };
+    case "question":
+      return {
+        type: "turn_question",
+        round: state.round,
+        chainDepth: state.chainDepth,
+        answering: state.turn?.answering,
+        questionText: state.turn?.question?.text,
+        options: state.turn?.question?.options,
+        difficulty: state.turn?.question?.difficulty,
+        answerTimeMs: Math.max(0, Number(state.phaseEndsAt) - nowMs()),
+      };
+    case "reveal":
+      return {
+        type: "round_result",
+        round: state.round,
+        chainDepth: state.chainDepth,
+        answering: state.turn?.answering,
+        answer: state.turn?.answer ?? null,
+        timedOut: Boolean(state.turn?.timedOut),
+        correct: Boolean(state.turn?.correct),
+        correctAnswer: state.turn?.question?.answer ?? null,
+        answererDelta: Number(state.turn?.answererDelta ?? 0),
+        eliminated: state.eliminated ?? [],
+      };
+    case "picking":
+      return {
+        type: "pick_start",
+        picker: state.currentPick?.picker,
+        choices: state.currentPick?.choices ?? [],
+        pickTimeMs: Math.max(0, Number(state.phaseEndsAt) - nowMs()),
+      };
+    case "gameover":
+      return { type: "game_over", winner: state.winner ?? null, rounds: state.round };
+    default:
+      return null;
+  }
+}
+
+/** state first so the client can render off it, then the phase event */
+async function broadcastPhase(event, lobbyId, state) {
+  await broadcastGameState(event, lobbyId, state);
+  const msg = phaseMessage(state);
+  if (msg) await broadcast(event, lobbyId, msg);
+}
+
+/**
+ * The phaseAdvance entry point — invoked by Step Functions, not by a socket.
+ * Returns the next {waitUntil, phaseSeq, done} so the state machine loops.
+ */
+async function onPhaseTimer(event) {
+  const lobbyId = event.lobbyId;
+  const firedFor = Number(event.phaseSeq);
+  const pool = await loadQuestionPool();
+
+  const res = await mutateGameState(lobbyId, (s) => {
+    if (Number(s.phaseSeq ?? 0) !== firedFor) return null; // stale — phase moved
+    if (s.phase === "gameover") return null;
+    if (nowMs() < Number(s.phaseEndsAt ?? 0) - TIMER_TOLERANCE_MS) return null; // early
+    return advanceOnDeadline(s, pool);
+  });
+
+  if (!res.ok) {
+    const cur = await readGameState(lobbyId);
+    if (!cur || cur.phase === "gameover") return { done: true, lobbyId };
+    // somebody else now owns the timer for this match
+    if (Number(cur.phaseSeq ?? 0) !== firedFor) return { done: true, lobbyId };
+    // our phase is still current but the deadline moved out — wait again
+    return {
+      done: false,
+      lobbyId,
+      phaseSeq: cur.phaseSeq,
+      waitUntil: new Date(Number(cur.phaseEndsAt)).toISOString(),
+      source: "phase-timer",
+    };
+  }
+
+  const s = res.state;
+  await broadcastPhase(event, lobbyId, s);
+  if (s.phase === "gameover") return { done: true, lobbyId };
+  return {
+    done: false,
+    lobbyId,
+    phaseSeq: s.phaseSeq,
+    waitUntil: new Date(Number(s.phaseEndsAt)).toISOString(),
+    source: "phase-timer",
+  };
 }
 
 /** push the current state to everyone in the lobby */
@@ -993,6 +1485,22 @@ async function onJoin(event, connectionId, msg, row) {
   // on this message, so send it and keep the contract honest
   await postTo(event, connectionId, { type: "chat_history", messages: [] });
   await broadcastLobbyState(event, canonicalId);
+
+  // RESYNC — a socket joining mid-match is caught up on the spot. Every
+  // deadline in the state is absolute, so the phase message below carries the
+  // REMAINING time rather than the original duration: a client that reloads
+  // two seconds into a five-second spin is told 3000ms, lands mid-animation
+  // and stays in step. This is what room.ts's resyncSocket() did from memory,
+  // except the memory now survives the process.
+  const running = await readGameState(canonicalId);
+  if (running && running.phase !== "gameover") {
+    await postTo(event, connectionId, {
+      type: "game_state",
+      state: publicGameState(running),
+    });
+    const pm = phaseMessage(running);
+    if (pm) await postTo(event, connectionId, pm);
+  }
   if (isNew) {
     await systemChat(event, canonicalId, `${displayName} joined the room`);
   }
@@ -1094,7 +1602,6 @@ const HOST_ONLY_ACTIONS = new Set([
   "start_game",
   "kick_player",
   "terminate_lobby",
-  "advance_phase", // P2.0 scaffold — goes away with the scheduler
 ]);
 
 /** English-neutral; the client localises off `reason` + `action` */
@@ -1102,7 +1609,6 @@ const HOST_ONLY_MESSAGE = {
   start_game: "Only the room host can start the game.",
   kick_player: "Only the room host can remove players.",
   terminate_lobby: "Only the room host can close the room.",
-  advance_phase: "Only the room host can advance the match.",
 };
 
 async function requireHost(event, connectionId, row, action) {
@@ -1187,7 +1693,8 @@ async function onLeave(event, connectionId, row) {
  *
  * Host-gated upstream by requireHost(). No turn logic runs here: the match is
  * created in `countdown` with a real deadline and stops. What advances it is
- * P2.1's scheduler; until then, `advance_phase` below does it by hand.
+ * the scheduler: rearmPhaseTimer() starts a Step Functions execution that
+ * sleeps until `phaseEndsAt` and then drives the match forward.
  */
 async function onStartGame(event, connectionId, row) {
   const lobbyId = row.lobbyId;
@@ -1249,60 +1756,76 @@ async function onStartGame(event, connectionId, row) {
 
   await broadcastGameState(event, lobbyId, state);
   await systemChat(event, lobbyId, "The match is starting…");
+  // arm the countdown deadline; from here the scheduler drives the match
+  await rearmPhaseTimer(state, existing?.executionArn);
 }
 
 /**
- * advance_phase — P2.0 SCAFFOLD, host-gated, to be deleted in P2.1.
+ * submit_answer — only the player the wheel landed on, only before the
+ * deadline, only once. Everyone else's submission is silently ignored exactly
+ * as room.ts ignores it.
  *
- * Moves the phase machine one step and re-stamps `phaseEndsAt`, so state
- * transitions and the version lock can be exercised end-to-end before a
- * scheduler exists. It runs NO game logic: nothing is drawn, nobody is picked,
- * no money moves. P2.1 replaces this with Step Functions firing on
- * `phaseEndsAt`, and the per-phase logic lands with it.
+ * Answering early ends the question phase immediately, which is a
+ * player-driven transition: the sleeping timer is stopped and re-armed on the
+ * new reveal deadline.
+ *
+ * P2.2 inserts the betting pause between here and reveal; for now a submitted
+ * answer resolves straight through.
  */
-const NEXT_PHASE = {
-  countdown: "spin",
-  spin: "question",
-  question: "betting",
-  betting: "reveal",
-  reveal: "picking",
-  picking: "spin",
-  duel: "reveal",
-};
-
-function phaseDuration(phase, chainDepth) {
-  switch (phase) {
-    case "countdown": return COUNTDOWN_MS;
-    case "spin": return SPIN_TIME_MS;
-    case "question": return questionTimeFor(chainDepth);
-    case "betting": return BETTING_TIME_MS;
-    case "reveal": return REVEAL_MS;
-    case "picking": return PICK_TIME_MS;
-    case "duel": return DUEL_TIME_MS;
-    default: return 0;
-  }
-}
-
-async function onAdvancePhase(event, connectionId, row) {
-  const res = await mutateGameState(row.lobbyId, (s) => {
-    const next = NEXT_PHASE[s.phase];
-    if (!next) return null; // gameover / lobby — nothing to advance
-    s.phase = next;
-    s.phaseEndsAt = nowMs() + phaseDuration(next, s.chainDepth);
-    if (next === "question") s.round += 1;
-    return s;
-  });
-
-  if (!res.ok) {
+async function onSubmitAnswer(event, connectionId, row, msg) {
+  if (!row?.username || !row?.lobbyId) {
     await postTo(event, connectionId, {
-      type: "error", reason: res.reason, action: "advance_phase",
-      message: res.reason === "no_state"
-        ? "No match is running in this room."
-        : "Could not advance the phase.",
+      type: "error", reason: "not_joined", action: "submit_answer",
+      message: "Join the room before doing that.",
     });
     return;
   }
-  await broadcastGameState(event, row.lobbyId, res.state);
+  const answer = String(msg.answer ?? "");
+  const pool = await loadQuestionPool();
+  const before = await readGameState(row.lobbyId);
+
+  const res = await mutateGameState(row.lobbyId, (s) => {
+    if (s.phase !== "question" || !s.turn) return null;
+    if (s.turn.answering !== row.username) return null;
+    if (s.turn.answer !== null && s.turn.answer !== undefined) return null;
+    if (nowMs() > Number(s.phaseEndsAt ?? 0)) return null; // too late — the timer owns it
+    s.turn.answer = answer;
+    s.turn.answeredInMs = nowMs() - Number(s.turn.askedAt ?? nowMs());
+    return enterReveal(s);
+  });
+
+  if (!res.ok) return; // not their turn, already answered, or past the buzzer
+  await broadcastPhase(event, row.lobbyId, res.state);
+  await rearmPhaseTimer(res.state, before?.executionArn);
+}
+
+/**
+ * pick_player — the correct answerer chooses who faces the next question.
+ * P2.3 adds the CHALLENGE / DUEL mode choice on top of this target choice.
+ */
+async function onPickPlayer(event, connectionId, row, msg) {
+  if (!row?.username || !row?.lobbyId) {
+    await postTo(event, connectionId, {
+      type: "error", reason: "not_joined", action: "pick_player",
+      message: "Join the room before doing that.",
+    });
+    return;
+  }
+  const target = String(msg.target ?? "");
+  const pool = await loadQuestionPool();
+  const before = await readGameState(row.lobbyId);
+
+  const res = await mutateGameState(row.lobbyId, (s) => {
+    if (s.phase !== "picking" || !s.currentPick) return null;
+    if (s.currentPick.picker !== row.username) return null;
+    if (!(s.currentPick.choices ?? []).includes(target)) return null;
+    s.chainDepth = Number(s.chainDepth ?? 0) + 1;
+    return enterQuestion(s, target, pool);
+  });
+
+  if (!res.ok) return;
+  await broadcastPhase(event, row.lobbyId, res.state);
+  await rearmPhaseTimer(res.state, before?.executionArn);
 }
 
 /**
@@ -1362,8 +1885,12 @@ async function onDefault(event) {
         await onStartGame(event, connectionId, row);
         break;
       }
-      if (type === "advance_phase") {
-        await onAdvancePhase(event, connectionId, row);
+      if (type === "submit_answer") {
+        await onSubmitAnswer(event, connectionId, row, msg);
+        break;
+      }
+      if (type === "pick_player") {
+        await onPickPlayer(event, connectionId, row, msg);
         break;
       }
       if (TURN_ENGINE_ACTIONS.has(type)) {
@@ -1386,7 +1913,29 @@ async function onDefault(event) {
 }
 
 // ─── handler ───────────────────────────────────────────────────────────────
+/**
+ * Two entry points, one function.
+ *
+ *   API Gateway  → event.requestContext.routeKey is $connect/$disconnect/$default
+ *   Step Functions → no requestContext; the execution input carries
+ *                    source: "phase-timer"
+ *
+ * They share a function deliberately: a deadline firing and a player answering
+ * early run the SAME transition code (enterReveal, afterReveal, enterSpin…).
+ * Splitting them into two deployments would mean two copies of the engine and
+ * the certainty that they drift.
+ */
 export const handler = async (event) => {
+  if (event?.source === "phase-timer" && event.lobbyId) {
+    try {
+      return await onPhaseTimer(event);
+    } catch (err) {
+      console.error("phase timer failed", event.lobbyId, err);
+      // let the state machine stop rather than spin on a poisoned match
+      return { done: true, lobbyId: event.lobbyId, error: String(err?.message ?? err) };
+    }
+  }
+
   const routeKey = event.requestContext?.routeKey;
   try {
     switch (routeKey) {

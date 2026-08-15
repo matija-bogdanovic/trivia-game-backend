@@ -48,6 +48,21 @@
       "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/GameState"
     },
     {
+      "Sid": "QuestionsRead",
+      "Effect": "Allow",
+      "Action": "dynamodb:Scan",
+      "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Questions"
+    },
+    {
+      "Sid": "PhaseTimerStateMachine",
+      "Effect": "Allow",
+      "Action": ["states:StartExecution", "states:StopExecution"],
+      "Resource": [
+        "arn:aws:states:eu-west-3:637423486388:stateMachine:ipakSeOkrecePhaseTimer",
+        "arn:aws:states:eu-west-3:637423486388:execution:ipakSeOkrecePhaseTimer:*"
+      ]
+    },
+    {
       "Sid": "LobbiesTableReadAndClose",
       "Effect": "Allow",
       "Action": ["dynamodb:GetItem", "dynamodb:DeleteItem"],
