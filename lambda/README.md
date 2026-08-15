@@ -1,10 +1,13 @@
 # Paste-ready Lambda handlers
 
-Every HTTP route of the trivia backend, one self-contained file per Lambda
-function. **No dependencies to install, no zip, no layer** — each file imports
-only AWS SDK v3 (which ships in the Node.js 18/20/22 Lambda runtime) and Node
-built-ins (`node:crypto`, global `fetch`). Paste, set env vars, attach IAM, wire
-the route.
+Every HTTP route of the trivia backend, one self-contained file per route.
+**No dependencies to install and no layer** — each file imports only AWS SDK v3
+(which ships in the Node.js 18/20/22/24 Lambda runtime) and Node built-ins
+(`node:crypto`, global `fetch`).
+
+Run them either as **one Lambda** behind `index.mjs`, a router over a single
+`ANY /{proxy+}` route (§2b — the current deployment), or as **sixteen Lambdas**,
+each file pasted into its own function (§2c).
 
 The real-time WebSocket game is **not** here — see
 [`docs/websocket-game-later.md`](../docs/websocket-game-later.md).
@@ -61,43 +64,20 @@ falls back to the stored roster; Lambda only has the stored roster.
 
 ---
 
-## 2. How to deploy one function
+## 2. Deploying — pick ONE layout
 
-Repeat per file. In the Lambda console:
+Two ways to run these, and they are mutually exclusive:
 
-1. **Create function** → Author from scratch → Runtime **Node.js 22.x** →
-   Architecture `arm64`.
-2. Name it after the file (`wallet`, `createRoom`, …).
-3. The default code file is **`index.mjs`** — keep that name. Paste the file
-   over it, **Deploy**. (Renaming it to `index.js` breaks `export const
-   handler` with `Cannot use import statement outside a module`.)
-4. Configuration → General → **Timeout 15s, Memory 512 MB**.
-5. Configuration → Environment variables — from the file's own header block.
-6. Configuration → Permissions → Execution role → **Use an existing role** →
-   pick the one shared role from [§2a](#2a-one-shared-execution-role). Create
-   that role once, before the first function.
-7. **Add trigger → API Gateway → HTTP API → Security: Open**, then edit the
-   route so the path and method match the table above exactly.
+- **[§2b One function + router](#2b-one-function--router-current-deployment)** —
+  one Lambda, one `ANY /{proxy+}` API Gateway resource, `index.mjs` dispatching
+  to the 16 handlers. **This is what is currently deployed.** Fewest moving
+  parts; a zip upload rather than a console paste.
+- **[§2c Sixteen functions](#2c-sixteen-functions-paste-per-function)** — one
+  Lambda per route, each file pasted as `index.mjs`, 16 API Gateway routes.
+  True paste-and-go, per-function metrics and throttles.
 
-> Leave every route **Open** in API Gateway. The handlers verify the Cognito
-> token themselves and return their own 401. Adding a JWT authorizer on top
-> would also work but is redundant.
-
-### Environment variables at a glance
-
-| Variable | Value | Needed by |
-| --- | --- | --- |
-| `ALLOWED_ORIGIN` | `https://<your-vercel-domain>,http://localhost:3000` | all |
-| `COGNITO_USER_POOL_ID` | `eu-west-3_Uylh5ZFUK` | the 11 authed ones |
-| `COGNITO_CLIENT_ID` | `3j69q67dfk60kl92gukqhdlr91` | the 11 authed ones |
-| `WALLETS_TABLE` | `Wallets` | wallet, shopBuy, friends*, createRoom, avatarUpload |
-| `LOBBIES_TABLE` | `Lobbies` | lobbies, getActiveRooms, create/join/leaveRoom, getRoom* |
-| `MATCHES_TABLE` | `Matches` | matchDetail |
-| `AVATAR_BUCKET` | `ipak-se-okrece-avatars` | avatarUpload, avatarServe |
-
-**Do not set `AWS_REGION`** — it is reserved, Lambda sets it, and the console
-refuses to save it. Every variable has a working default compiled in, so a bare
-paste runs; setting them is still correct.
+Both use the same handler files and the same shared role from
+[§2a](#2a-one-shared-execution-role). Read §2a first either way.
 
 ## 2a. One shared execution role
 
@@ -183,6 +163,110 @@ new way, split that one out rather than tightening all of them.
 
 Each file still documents its own minimal permissions in its header, so
 splitting later is copy-and-paste.
+
+## 2b. One function + router (current deployment)
+
+One Lambda serves every route; `index.mjs` dispatches on method + path. This is
+the layout currently deployed as the `ipakseokrece` function.
+
+### Upload the code
+
+The console cannot paste 17 files, so this layout is a zip upload. The zip's
+**root** must contain `index.mjs` plus all 16 handler files, with no wrapping
+folder — `zip -j` flattens for exactly that reason:
+
+```bash
+cd /Users/matijabogdanovic/trivia-game-backend/lambda
+zip -j ../ipakseokrece-lambda.zip *.mjs      # 17 files at the zip root
+```
+
+Lambda console → the function → **Code → Upload from → .zip file** → select it
+→ Save. Then under Runtime settings confirm:
+
+| Setting | Value |
+| --- | --- |
+| Handler | `index.handler` |
+| Runtime | Node.js 22.x or 24.x |
+| Timeout | **15 s** (3 s is too tight for a cold start plus the first JWKS fetch) |
+| Memory | **512 MB** |
+
+Environment variables: set the **union** of every handler's needs on this one
+function — see [the table below](#environment-variables-at-a-glance).
+
+### Collapse API Gateway to one route
+
+Replace the 16 separately wired resources with a single catch-all:
+
+1. Resources → **Create Resource** → tick **Configure as proxy resource**
+   (path `{proxy+}`) → Create.
+2. It creates an **ANY** method. Integration type **Lambda Function** →
+   **⚠ tick "Use Lambda Proxy integration"** → function `ipakseokrece` → Save.
+3. Delete the 16 old resources (`/avatar`, `/wallet`, …) so nothing shadows the
+   catch-all.
+4. API settings → **Binary media types** → add the wildcard `*/*` (needed by
+   `GET /avatar/img/{username}`; see [the binary route](#the-one-binary-route)).
+5. **Actions → Deploy API** → stage `prod`. Nothing takes effect until you
+   deploy.
+
+> **"Use Lambda Proxy integration" is not optional.** The integration type is
+> currently `AWS` (non-proxy), which is why a crashing function came back as
+> HTTP **200** carrying the raw error JSON: non-proxy hands the function's
+> return value through as the response *body* and ignores `statusCode` and
+> `headers` completely. Under non-proxy the handlers also never receive
+> `event.headers`, `event.body` or `pathParameters`, so auth and CORS cannot
+> work at all. Tick the box.
+
+`ANY /{proxy+}` also delivers `OPTIONS` to the function, which is what makes
+the CORS preflight work — `index.mjs` answers it directly with 204.
+
+`/getRoomCode` is deliberately not in the router's table and falls through to
+404; see the inventory above for why it cannot work.
+
+### Trade-off vs sixteen functions
+
+One function means one set of CloudWatch logs and one concurrency pool for
+every route — a burst of avatar uploads can throttle the leaderboard, and you
+cannot tune memory or timeout per route. Against that: one thing to deploy, one
+route to wire, one place to set env vars. At this scale that is the better
+trade; splitting later is just uploading the same files to more functions.
+
+## 2c. Sixteen functions (paste per function)
+
+Repeat per file. In the Lambda console:
+
+1. **Create function** → Author from scratch → Runtime **Node.js 22.x** →
+   Architecture `arm64`.
+2. Name it after the file (`wallet`, `createRoom`, …).
+3. The default code file is **`index.mjs`** — keep that name. Paste the file
+   over it, **Deploy**. (Renaming it to `index.js` breaks `export const
+   handler` with `Cannot use import statement outside a module`.)
+4. Configuration → General → **Timeout 15s, Memory 512 MB**.
+5. Configuration → Environment variables — from the file's own header block.
+6. Configuration → Permissions → Execution role → **Use an existing role** →
+   pick the one shared role from [§2a](#2a-one-shared-execution-role). Create
+   that role once, before the first function.
+7. **Add trigger → API Gateway → HTTP API → Security: Open**, then edit the
+   route so the path and method match the table above exactly.
+
+> Leave every route **Open** in API Gateway. The handlers verify the Cognito
+> token themselves and return their own 401. Adding a JWT authorizer on top
+> would also work but is redundant.
+
+### Environment variables at a glance
+
+| Variable | Value | Needed by |
+| --- | --- | --- |
+| `ALLOWED_ORIGIN` | `https://<your-vercel-domain>,http://localhost:3000` | all |
+| `COGNITO_USER_POOL_ID` | `eu-west-3_Uylh5ZFUK` | the 11 authed ones |
+| `COGNITO_CLIENT_ID` | `3j69q67dfk60kl92gukqhdlr91` | the 11 authed ones |
+| `WALLETS_TABLE` | `Wallets` | wallet, shopBuy, friends*, createRoom, avatarUpload |
+| `LOBBIES_TABLE` | `Lobbies` | lobbies, getActiveRooms, create/join/leaveRoom, getRoom* |
+| `MATCHES_TABLE` | `Matches` | matchDetail |
+| `AVATAR_BUCKET` | `ipak-se-okrece-avatars` | avatarUpload, avatarServe |
+
+**Do not set `AWS_REGION`** — it is reserved, Lambda sets it, and the console
+refuses to save it. Every variable has a working default compiled in, so a bare
+paste runs; setting them is still correct.
 
 ### CORS — pick one, never both
 
