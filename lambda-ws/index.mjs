@@ -1445,12 +1445,19 @@ async function broadcastLobbyState(event, lobbyId) {
   await broadcast(event, lobbyId, message);
 }
 
-/** the system-voice chat line GameRoom.systemChat() writes */
-async function systemChat(event, lobbyId, text) {
+/**
+ * The system-voice chat line GameRoom.systemChat() writes.
+ *
+ * `reason` is a stable machine-readable code — "joined", "left",
+ * "disconnected", "match_starting" — so the frontend can localise the line
+ * instead of rendering the English `text`, which stays as the fallback.
+ */
+async function systemChat(event, lobbyId, text, reason = null) {
   await broadcast(event, lobbyId, {
     type: "chat_message",
     username: null,
     text,
+    ...(reason ? { reason } : {}),
     at: Date.now(),
   });
 }
@@ -1522,15 +1529,22 @@ async function onDisconnect(event) {
 
   if (row?.lobbyId) {
     try {
-      // in `lobby` phase the Express server drops the player outright rather
-      // than holding a seat, and says so in chat
+      // A DISCONNECT IS NOT A DEPARTURE. This handler deliberately keeps the
+      // player on the roster, keeps their money and keeps the room — only an
+      // explicit `leave` or POST /leaveRoom removes anyone. Saying "left the
+      // room" here made an ordinary page refresh read as someone walking out.
+      // The neutral line plus reason "disconnected" lets the client say
+      // whatever it likes ("se rekonektuje…") without the server implying
+      // something that did not happen.
       if (row.username) {
         await systemChat(
           event,
           row.lobbyId,
-          `${row.displayName || row.username} left the room`
+          `${row.displayName || row.username} disconnected`,
+          "disconnected"
         );
       }
+      // presence is unaffected: lobby_state still shows them as not connected
       await broadcastLobbyState(event, row.lobbyId);
     } catch (err) {
       console.error("disconnect broadcast failed", err);
@@ -1679,7 +1693,7 @@ async function onJoin(event, connectionId, msg, row) {
     if (pm) await postTo(event, connectionId, pm);
   }
   if (isNew) {
-    await systemChat(event, canonicalId, `${displayName} joined the room`);
+    await systemChat(event, canonicalId, `${displayName} joined the room`, "joined");
   }
 }
 
@@ -1855,11 +1869,13 @@ async function onLeave(event, connectionId, row) {
       ExpressionAttributeValues: { ":e": ttlFromNow() },
     })
   );
+  // the ONE place that claims someone left, because it is the one place they did
   if (row.username) {
     await systemChat(
       event,
       lobbyId,
-      `${row.displayName || row.username} left the room`
+      `${row.displayName || row.username} left the room`,
+      "left"
     );
   }
   await broadcastLobbyState(event, lobbyId);
@@ -1932,7 +1948,7 @@ async function onStartGame(event, connectionId, row) {
   }
 
   await broadcastGameState(event, lobbyId, state);
-  await systemChat(event, lobbyId, "The match is starting…");
+  await systemChat(event, lobbyId, "The match is starting…", "match_starting");
   // arm the countdown deadline; from here the scheduler drives the match
   await rearmPhaseTimer(state, existing?.executionArn);
 }
