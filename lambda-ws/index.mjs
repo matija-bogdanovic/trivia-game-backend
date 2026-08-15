@@ -42,7 +42,9 @@
  * ┌── WHAT THIS DOES, AND WHAT IT DOES NOT ─────────────────────────────────┐
  * │ DOES:     connect/disconnect bookkeeping, authenticated `join`, live    │
  * │           lobby presence (`lobby_state`), `chat`, `leave`, `ping`,      │
- * │           `kick_player`, and host-leaves-closes-the-room.               │
+ * │           `kick_player`, `terminate_lobby`, and host-leaves-closes-     │
+ * │           the-room. A closed room broadcasts `room_closed` with reason  │
+ * │           "host_closed" (terminate) or "host_left" (the host walked).   │
  * │ ENFORCES: host-only actions — `start_game`, `kick_player` and           │
  * │           `terminate_lobby` are refused with reason "not_host" unless   │
  * │           the sender is the room's Admin. Server-side and permanent.    │
@@ -52,8 +54,8 @@
  * │           no Lambda could hold · P2.2 the central pot and               │
  * │           accuracy-derived quotas · P2.3 the picking-phase              │
  * │           CHALLENGE / DUEL choice.                                      │
- * │ DOES NOT: `play_again`, `terminate_lobby` and the OLD guess/code duel   │
- * │           (`submit_guess`, `submit_code`) still answer                  │
+ * │ DOES NOT: `play_again` and the OLD guess/code duel (`submit_guess`,     │
+ * │           `submit_code`) still answer                                   │
  * │           { type: "not_implemented" } — see TURN_ENGINE_ACTIONS below.  │
  * │           Elimination-at-0 is wired but standings/persistence are P2.4. │
  * └────────────────────────────────────────────────────────────────────────┘
@@ -118,6 +120,7 @@ import {
   HOST_ONLY_ACTIONS,
   onKickPlayer,
   onLeave,
+  onTerminateLobby,
   requireHost,
 } from "./lib/handlers/room.mjs";
 import { onPhaseTimer } from "./lib/scheduler.mjs";
@@ -146,7 +149,6 @@ const TURN_ENGINE_ACTIONS = new Set([
   "submit_guess",
   "submit_code",
   "play_again",
-  "terminate_lobby",
 ]);
 /**
  * $default — every message lands here. The API's route selection expression is
@@ -219,6 +221,10 @@ async function onDefault(event) {
       }
       if (type === "kick_player") {
         await onKickPlayer(event, connectionId, row, msg);
+        break;
+      }
+      if (type === "terminate_lobby") {
+        await onTerminateLobby(event, connectionId, row);
         break;
       }
       if (TURN_ENGINE_ACTIONS.has(type)) {

@@ -132,6 +132,43 @@ async function requireHost(event, connectionId, row, action) {
 }
 
 /**
+ * terminate_lobby — the host closes the room on purpose ("Zatvori sobu").
+ *
+ * Host-gated upstream by requireHost(), so the identity is a Cognito-verified
+ * username compared against the Lobbies Admin — a non-host is refused with
+ * reason "not_host" and nothing here runs.
+ *
+ * It is the SAME teardown the host walking out performs: closeRoom() tells
+ * everyone, then deletes the Lobbies item, the GameState item and every
+ * Connections row. Deliberately one shared function rather than two — a second
+ * copy of "close a room" is a second place for the ordering to be got wrong.
+ *
+ * ⚠ THE REASON DIFFERS, ON PURPOSE: "host_closed", not "host_left". Both mean
+ *   the room is gone, but they are different sentences to a player — "domaćin
+ *   je zatvorio sobu" vs "domaćin je napustio sobu" — and the server is the
+ *   only side that knows which happened. A client that only understands
+ *   "host_left" still behaves correctly if it routes on `type` and treats the
+ *   reason as a label.
+ *
+ * IDEMPOTENT. Every step is a delete of something that may already be gone, so
+ * a double-click is harmless; the second call finds no room and is answered
+ * with reason "room_not_found" rather than pretending to close it again.
+ */
+async function onTerminateLobby(event, connectionId, row) {
+  const lobby = await resolveLobby(row.lobbyId);
+  if (!lobby) {
+    await postTo(event, connectionId, {
+      type: "error", reason: "room_not_found", action: "terminate_lobby",
+      message: "That room no longer exists.",
+    });
+    return;
+  }
+  // resolveLobby accepts a room code too; tear down by the real id so the
+  // GSI partition, the Lobbies key and the GameState key all agree
+  await closeRoom(event, String(lobby.lobby_id), "host_closed");
+}
+
+/**
  * leave — an explicit, intentional departure.
  *
  * WHEN THE HOST LEAVES, THE ROOM IS DELETED. Note this is a different case
@@ -337,5 +374,6 @@ export {
   isHostOf,
   onKickPlayer,
   onLeave,
+  onTerminateLobby,
   requireHost,
 };
