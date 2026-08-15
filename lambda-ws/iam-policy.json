@@ -63,9 +63,9 @@
       ]
     },
     {
-      "Sid": "LobbiesTableReadAndClose",
+      "Sid": "LobbiesTableReadCloseAndKick",
       "Effect": "Allow",
-      "Action": ["dynamodb:GetItem", "dynamodb:DeleteItem"],
+      "Action": ["dynamodb:GetItem", "dynamodb:DeleteItem", "dynamodb:UpdateItem"],
       "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Lobbies"
     },
     {

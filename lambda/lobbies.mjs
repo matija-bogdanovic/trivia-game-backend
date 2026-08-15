@@ -52,8 +52,8 @@
  * ── CONTRACT (matches the Express route exactly — do not change) ───────────
  *   Request:  GET /lobbies
  *   Response: 200 { lobbies: [{ lobbyId, code, roomName, isPrivate,
- *                               playerCount, maxPlayers, phase, isLive,
- *                               createdAt, host, categories }] }
+ *                               playerCount, maxPlayers, startingMoney, phase,
+ *                               isLive, createdAt, host, categories }] }
  *   Free seats are playerCount subtracted from maxPlayers. Rooms created
  *   before maxPlayers existed report 6, the cap they were created under.
  *
@@ -132,6 +132,8 @@ function json(event, statusCode, body) {
 const FRESH_LOBBY_MS = 60 * 60 * 1000;
 /** capacity for rooms written before `maxPlayers` was a stored field */
 const DEFAULT_MAX_PLAYERS = 6;
+/** stake for rooms written before `startingMoney` was a stored field */
+const DEFAULT_STARTING_MONEY = 500;
 
 /**
  * The single definition of an "active" lobby, shared with getActiveRooms.mjs:
@@ -144,7 +146,7 @@ async function listActiveLobbies() {
     new ScanCommand({
       TableName: LOBBIES_TABLE,
       ProjectionExpression:
-        "lobby_id, code, roomName, players, createdAt, isPrivate, #st, #cat, maxPlayers",
+        "lobby_id, code, roomName, players, createdAt, isPrivate, #st, #cat, maxPlayers, startingMoney",
       ExpressionAttributeNames: { "#st": "state", "#cat": "categories" },
     })
   );
@@ -164,6 +166,9 @@ async function listActiveLobbies() {
         // rooms created before maxPlayers existed have no attribute — 6 was
         // the hardcoded cap they were created under, so it is the right default
         maxPlayers: Number(l.maxPlayers ?? DEFAULT_MAX_PLAYERS),
+        // the stake this room is played for, so the join screen can show it
+        // before anyone commits a credit to entering
+        startingMoney: Number(l.startingMoney ?? DEFAULT_STARTING_MONEY),
         phase: "lobby",
         isLive: false,
         createdAt: l.createdAt ?? null,

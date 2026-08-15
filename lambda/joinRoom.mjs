@@ -386,7 +386,11 @@ export const handler = async (event) => {
             {
               id: String(id),
               player: username,
-              points: Number(500),
+              // the room's own starting stake, not a hardcoded 500 — otherwise
+              // a joiner shows a different bankroll in the lobby from the host
+              // who created it. Rooms written before the setting existed have
+              // no attribute and fall back to what they were created under.
+              points: Number(data.startingMoney ?? 500),
               role: String("Member"),
             },
           ],

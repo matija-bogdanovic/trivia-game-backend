@@ -66,8 +66,13 @@
  *                              or a non-string element answers 400,
  *               "maxPlayers"?: 4 — integer seat count; missing or unusable
  *                              stores 6, anything else is floored and clamped
- *                              to 2..8 rather than rejected }
- *   Response: 200 { message: "Room created", roomCode, lobbyId, creditsLeft }
+ *                              to 2..8 rather than rejected,
+ *               "startingMoney"?: 1500 — coins every player is seated with;
+ *                              missing or unusable stores 500, anything else
+ *                              is floored and clamped to 500..2500 rather
+ *                              than rejected }
+ *   Response: 200 { message: "Room created", roomCode, lobbyId, creditsLeft,
+ *                   startingMoney }
  *             400 { error: "Missing required fields" }
  *             400 { error: "Private rooms need a password (4+ characters)" }
  *             403 { error: "Not enough credits", credits, nextCreditInMs }
@@ -429,6 +434,31 @@ function normalizeMaxPlayers(raw) {
   return Math.min(MAX_ROOM_CAPACITY, Math.max(MIN_ROOM_CAPACITY, n));
 }
 
+// ─── starting coins ────────────────────────────────────────────────────────
+const DEFAULT_STARTING_MONEY = 500;
+const MIN_STARTING_MONEY = 500;
+const MAX_STARTING_MONEY = 2500;
+
+/**
+ * Normalises `startingMoney` — what every player is seated with when the match
+ * begins. Clamped rather than rejected, exactly like normalizeMaxPlayers:
+ *   missing / not a number / NaN  -> 500
+ *   300 / 5000                    -> 500 / 2500  (clamped to the range)
+ *   1200.9                        -> 1200        (floored)
+ *
+ * The floor is 500 because it is the stake the whole economy is tuned around:
+ * a wrong answer costs 100 and the minimum bet is 10, so a smaller bankroll
+ * would make the first mistake close to fatal. The ceiling is 2500 to keep
+ * matches finite — every unit of it has to be lost by somebody before the
+ * match can end.
+ */
+function normalizeStartingMoney(raw) {
+  if (raw === undefined || raw === null || raw === "") return DEFAULT_STARTING_MONEY;
+  const n = Math.floor(Number(raw));
+  if (!Number.isFinite(n)) return DEFAULT_STARTING_MONEY;
+  return Math.min(MAX_STARTING_MONEY, Math.max(MIN_STARTING_MONEY, n));
+}
+
 // ─── handler ───────────────────────────────────────────────────────────────
 export const handler = async (event) => {
   // CORS preflight, when API Gateway is not answering it for us
@@ -450,8 +480,10 @@ export const handler = async (event) => {
   }
 
   try {
-    const { playerId, roomName, isPrivate, password, categories, maxPlayers } =
-      body;
+    const {
+      playerId, roomName, isPrivate, password, categories, maxPlayers,
+      startingMoney,
+    } = body;
     if (!roomName) {
       return json(event, 400, { error: "Missing required fields" });
     }
@@ -462,6 +494,7 @@ export const handler = async (event) => {
       });
     }
     const roomMaxPlayers = normalizeMaxPlayers(maxPlayers);
+    const roomStartingMoney = normalizeStartingMoney(startingMoney);
     const roomIsPrivate = Boolean(isPrivate);
     if (roomIsPrivate) {
       if (typeof password !== "string" || password.length < 4) {
@@ -497,13 +530,17 @@ export const handler = async (event) => {
           isPrivate: roomIsPrivate,
           categories: roomCategories,
           maxPlayers: roomMaxPlayers,
+          // what every seat is worth when the match starts. The WebSocket
+          // function reads this when it seeds the match state, so the number
+          // chosen here is the number the game is actually played with.
+          startingMoney: roomStartingMoney,
           ...(passwordHash ? { passwordHash } : {}),
           players: [
             {
               id: String(playerId),
               player: username,
               role: "Admin",
-              points: Number(500),
+              points: Number(roomStartingMoney),
             },
           ],
           // no rounds array — games always run until one player has money
@@ -517,6 +554,9 @@ export const handler = async (event) => {
       roomCode: roomCode,
       lobbyId,
       creditsLeft: wallet.credits,
+      // echoed back so the client can show what the clamp actually settled on
+      // rather than what it asked for
+      startingMoney: roomStartingMoney,
     });
   } catch (err) {
     console.error("Error creating room:", err);

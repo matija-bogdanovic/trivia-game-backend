@@ -139,7 +139,23 @@ function capacityOf(lobby) {
   const n = Math.floor(Number(lobby?.maxPlayers));
   return Number.isFinite(n) && n > 0 ? n : MAX_PLAYERS;
 }
+/**
+ * Fallback stake for rooms created before `startingMoney` was a setting, and
+ * the floor the REST side clamps to. The real number comes from the room:
+ * createRoom stores `startingMoney` (500..2500) on the Lobbies item and
+ * startingMoneyOf() below is the single place that reads it, so the lobby
+ * preview and the seeded match can never disagree about what a seat is worth.
+ */
 const STARTING_MONEY = 500;
+const MIN_STARTING_MONEY = 500;
+const MAX_STARTING_MONEY = 2500;
+
+/** the room's stake, clamped again here — a hand-edited item is still a room */
+function startingMoneyOf(lobby) {
+  const n = Math.floor(Number(lobby?.startingMoney));
+  if (!Number.isFinite(n)) return STARTING_MONEY;
+  return Math.min(MAX_STARTING_MONEY, Math.max(MIN_STARTING_MONEY, n));
+}
 const CHAT_MAX_LENGTH = 300;
 const CHAT_MIN_INTERVAL_MS = 500;
 const CHAT_HISTORY_LIMIT = 50;
@@ -260,7 +276,6 @@ const TURN_ENGINE_ACTIONS = new Set([
   "submit_guess",
   "submit_code",
   "play_again",
-  "kick_player",
   "terminate_lobby",
 ]);
 
@@ -571,6 +586,12 @@ function initialGameState(lobby, lobbyId, connRows) {
   const live = new Map();
   for (const c of connRows) if (c.username) live.set(c.username, c);
 
+  // EVERY seat is worth the same, and it is the room's own setting. This is
+  // the only place a starting balance is minted in the whole match — after
+  // this line money only ever moves, which is what makes
+  // sum(money) + pot == players × startingMoney provable for the whole game.
+  const startingMoney = startingMoneyOf(lobby);
+
   const roster = Array.isArray(lobby?.players) ? lobby.players : [];
   const players = roster
     .filter((seat) => live.has(String(seat.player)))
@@ -581,7 +602,7 @@ function initialGameState(lobby, lobbyId, connRows) {
         username,
         displayName: conn?.displayName || username,
         avatar: conn?.avatar ?? null,
-        money: STARTING_MONEY,
+        money: startingMoney,
         alive: true,
         connected: true,
         isHost: seat.role === "Admin",
@@ -603,6 +624,10 @@ function initialGameState(lobby, lobbyId, connRows) {
     roomName: lobby?.roomName ?? `Room ${lobby?.code ?? ""}`.trim(),
     maxPlayers: capacityOf(lobby),
     minPlayers: MIN_PLAYERS,
+    // persisted on the match, not re-read from the room: changing the room's
+    // setting mid-match must not retroactively change what this match was
+    // seeded with, and the conservation check needs the original number
+    startingMoney,
 
     phase: "countdown",
     // phaseSeq must exist from the very first phase: the scheduler's guard
@@ -647,6 +672,7 @@ function publicGameState(s) {
     roomName: s.roomName,
     minPlayers: s.minPlayers,
     maxPlayers: s.maxPlayers,
+    startingMoney: Number(s.startingMoney ?? STARTING_MONEY),
     players: (s.players ?? []).map((p) => ({
       username: p.username,
       displayName: p.displayName,
@@ -1811,6 +1837,7 @@ async function broadcastGameState(event, lobbyId, state) {
  * Phase 0 is always in `lobby` phase because there is no turn engine yet.
  */
 async function lobbyStateMessage(lobby, lobbyId) {
+  const startingMoney = startingMoneyOf(lobby);
   const live = await connectionsInLobby(lobbyId);
   const byUsername = new Map();
   for (const row of live) {
@@ -1835,7 +1862,7 @@ async function lobbyStateMessage(lobby, lobbyId) {
       username,
       displayName: conn?.displayName || username,
       avatar: conn?.avatar ?? null,
-      money: Number(seat.points ?? STARTING_MONEY),
+      money: Number(seat.points ?? startingMoney),
       alive: true, // phase is always "lobby" in Phase 0
       connected: Boolean(conn),
       isHost: seat.role === "Admin",
@@ -1851,7 +1878,7 @@ async function lobbyStateMessage(lobby, lobbyId) {
       username,
       displayName: conn.displayName || username,
       avatar: conn.avatar ?? null,
-      money: STARTING_MONEY,
+      money: startingMoney,
       alive: true,
       connected: true,
       isHost: false,
@@ -1883,6 +1910,9 @@ async function lobbyStateMessage(lobby, lobbyId) {
     // the room's own capacity, not the global cap. Rooms written before
     // maxPlayers existed fall back to 6, which is what they were created under.
     maxPlayers: capacityOf(lobby),
+    // what a seat is worth when this room starts — same source the match is
+    // seeded from, so the lobby preview cannot promise a different number
+    startingMoney,
     round: 0,
     players,
   };
@@ -2332,6 +2362,160 @@ async function onLeave(event, connectionId, row) {
 }
 
 /**
+ * kick_player — the host removes someone from the room.
+ *
+ * Host-gated upstream by requireHost(), so the identity doing the kicking is a
+ * Cognito-verified username compared against the Lobbies Admin, not anything
+ * the message claims.
+ *
+ * FOUR THINGS HAVE TO HAPPEN, AND THE ORDER MATTERS:
+ *   1. tell the kicked player  — their Connections rows are the only way to
+ *      reach them, and step 3 deletes those rows. Message them first or the
+ *      `kicked` event has nowhere to go, which is the same ordering bug
+ *      closeRoom() documents.
+ *   2. off the roster          — removed by INDEX with a condition asserting
+ *      that index still holds that player, so a concurrent join or leave
+ *      cannot be clobbered by a whole-list overwrite.
+ *   3. drop their sockets      — the rows go, so presence stops counting them.
+ *      The sockets stay OPEN: `kicked` is the client's cue to navigate to
+ *      /rooms, and closing the connection would deny it the chance to act.
+ *   4. tell everyone else      — a system line plus a fresh lobby_state.
+ *
+ * IDEMPOTENT. Kicking someone already gone does each step's no-op: nobody to
+ * message, a conditional roster write that either finds nothing to remove or
+ * fails its condition harmlessly, no rows to delete. It still re-broadcasts
+ * presence and still answers the host, so a double-click is safe.
+ *
+ * THE ROOM SURVIVES and nobody else is touched. Self-kick is refused: the host
+ * leaving is `leave`/POST /leaveRoom, which deliberately CLOSES the room —
+ * quietly routing a self-kick into that would delete everyone's room from
+ * under them.
+ */
+async function onKickPlayer(event, connectionId, row, msg) {
+  const target = String(msg.target ?? msg.username ?? msg.player ?? "").trim();
+  if (!target) {
+    await postTo(event, connectionId, {
+      type: "error", reason: "missing_target", action: "kick_player",
+      message: "Name the player to remove.",
+    });
+    return;
+  }
+  if (target === row.username) {
+    await postTo(event, connectionId, {
+      type: "error", reason: "cannot_kick_self", action: "kick_player",
+      message: "You cannot remove yourself — leave the room instead.",
+    });
+    return;
+  }
+
+  const lobby = await resolveLobby(row.lobbyId);
+  if (!lobby) {
+    await postTo(event, connectionId, {
+      type: "error", reason: "room_not_found", action: "kick_player",
+      message: "That room no longer exists.",
+    });
+    return;
+  }
+  const canonicalId = String(lobby.lobby_id);
+
+  const roster = Array.isArray(lobby.players) ? lobby.players : [];
+  const seatIndex = roster.findIndex((p) => String(p?.player) === target);
+  const rows = (await connectionsInLobby(canonicalId)).filter(
+    (r) => r.username === target
+  );
+  const displayName = rows[0]?.displayName || target;
+
+  // 1 — reach them while they can still be reached
+  for (const r of rows) {
+    await postTo(event, r.connectionId, {
+      type: "kicked",
+      reason: "host",
+      lobbyId: canonicalId,
+      by: row.username,
+    });
+  }
+
+  // 2 — off the roster, atomically at that seat
+  let removedFromRoster = false;
+  if (seatIndex >= 0) {
+    try {
+      await ddb.send(
+        new UpdateCommand({
+          TableName: LOBBIES_TABLE,
+          Key: { lobby_id: canonicalId },
+          UpdateExpression: `REMOVE #players[${seatIndex}]`,
+          ConditionExpression: `#players[${seatIndex}].#player = :t`,
+          ExpressionAttributeNames: { "#players": "players", "#player": "player" },
+          ExpressionAttributeValues: { ":t": target },
+        })
+      );
+      removedFromRoster = true;
+    } catch (err) {
+      // the seat moved or emptied between our read and our write — somebody
+      // else already removed them, which is the outcome we wanted anyway
+      if (err?.name !== "ConditionalCheckFailedException") throw err;
+      console.warn("kick lost the roster race (already gone)", target);
+    }
+  }
+
+  // 3 — unbind their sockets
+  for (const r of rows) {
+    await deleteConnection(r.connectionId).catch((err) =>
+      console.error("kick: failed to delete connection", r.connectionId, err)
+    );
+  }
+
+  // 4 — a kicked player FORFEITS a match in progress. They keep their row in
+  // the match state (deleting it would make sum(money) + pot jump) but stop
+  // being alive, and their remaining money goes INTO THE POT exactly like a
+  // wrong answer's penalty — so it is inherited by whoever is still playing
+  // rather than stranded on a player who has left the building.
+  const running = await readGameState(canonicalId);
+  let forfeited = 0;
+  if (running && running.phase !== "gameover") {
+    const res = await mutateGameState(canonicalId, (s) => {
+      const p = (s.players ?? []).find((x) => x.username === target);
+      if (!p || !p.alive) return null; // never seated, or already out
+      forfeited = Math.max(0, Number(p.money ?? 0));
+      p.money = 0;
+      p.alive = false;
+      p.connected = false;
+      s.pot = Number(s.pot ?? 0) + forfeited;
+      s.kicked = [...(s.kicked ?? []), target];
+      // the match cannot continue with one player standing
+      return livingPlayers(s).length <= 1 ? enterGameOver(s) : s;
+    });
+    if (res.ok) {
+      await broadcastPhase(event, canonicalId, res.state);
+      if (res.state.phase === "gameover") {
+        await rearmPhaseTimer(res.state, running.executionArn);
+      }
+      // NOTE: if the kicked player owned the live phase (their question, their
+      // duel), the match is left to its EXISTING deadline rather than being
+      // shoved forward here. That timer already resolves an unanswered
+      // question as a timeout, so the cost is a wait of at most one phase and
+      // the alternative is a second transition racing the one above.
+    }
+  }
+
+  await systemChat(
+    event,
+    canonicalId,
+    `${displayName} was removed by the host`,
+    "kicked"
+  );
+  await broadcastLobbyState(event, canonicalId);
+
+  await postTo(event, connectionId, {
+    type: "kick_result",
+    target,
+    removedFromRoster,
+    connectionsClosed: rows.length,
+    forfeited,
+  });
+}
+
+/**
  * start_game — P2.0: build the state item, announce it, return.
  *
  * Host-gated upstream by requireHost(). No turn logic runs here: the match is
@@ -2735,6 +2919,10 @@ async function onDefault(event) {
       }
       if (type === "pick_player") {
         await onPickPlayer(event, connectionId, row, msg);
+        break;
+      }
+      if (type === "kick_player") {
+        await onKickPlayer(event, connectionId, row, msg);
         break;
       }
       if (TURN_ENGINE_ACTIONS.has(type)) {
