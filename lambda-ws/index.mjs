@@ -87,13 +87,18 @@ import {
 // ─── config ────────────────────────────────────────────────────────────────
 const REGION = process.env.AWS_REGION || "eu-west-3";
 const CONNECTIONS_TABLE = process.env.CONNECTIONS_TABLE || "Connections";
+const GAME_STATE_TABLE = process.env.GAME_STATE_TABLE || "GameState";
 const LOBBY_INDEX = process.env.CONNECTIONS_LOBBY_INDEX || "lobby-index";
 const LOBBIES_TABLE = process.env.LOBBIES_TABLE || "Lobbies";
 const WALLETS_TABLE = process.env.WALLETS_TABLE || "Wallets";
 const CONNECTION_TTL_SECONDS = Number(process.env.CONNECTION_TTL_SECONDS || 7200);
 
-// clients at module scope so warm invocations reuse the connections
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
+// clients at module scope so warm invocations reuse the connections.
+// removeUndefinedValues: the game state has genuinely optional branches (turn,
+// duel, currentPick) and an undefined would otherwise fail the whole write.
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }), {
+  marshallOptions: { removeUndefinedValues: true },
+});
 
 // ─── game constants (mirrors src/server/game/room.ts) ──────────────────────
 const MIN_PLAYERS = 2;
@@ -112,10 +117,67 @@ function capacityOf(lobby) {
 const STARTING_MONEY = 500;
 const CHAT_MAX_LENGTH = 300;
 const CHAT_MIN_INTERVAL_MS = 500;
+const CHAT_HISTORY_LIMIT = 50;
 
-/** the 9 socket actions that belong to the turn engine — Phase 1+ */
+// ─── phase clocks, ported verbatim from src/server/game/room.ts ─────────────
+// Every one becomes an ABSOLUTE `phaseEndsAt` in the stored state rather than
+// a setTimeout, because a Lambda that has returned cannot hold a timer. P2.1
+// points a scheduler at that timestamp.
+const COUNTDOWN_MS = 3000;      // room.ts ticks 3,2,1,0 then spins at t=3s
+const SPIN_TIME_MS = 5000;
+const BASE_QUESTION_TIME_MS = 15000;
+const MIN_QUESTION_TIME_MS = 8000;
+const BETTING_TIME_MS = 4500;   // room.ts has NO endsAt for this one — we do
+const REVEAL_MS = 5000;
+const PICK_TIME_MS = 15000;
+const DUEL_TIME_MS = 20000;
+const CODE_DUEL_TIME_MS = 90000;
+
+/** a question's clock shrinks as the chain deepens (room.ts askQuestion) */
+function questionTimeFor(chainDepth) {
+  return Math.max(MIN_QUESTION_TIME_MS, BASE_QUESTION_TIME_MS - chainDepth * 1000);
+}
+
+// ─── P2 design constants (state is seeded now, logic lands in later steps) ──
+/**
+ * SPIN WEIGHTS — the decaying model Matija locked in, replacing room.ts's
+ * single `lastSpinTarget` flag (which only dampened the immediately previous
+ * target, to a flat 0.4, with no memory).
+ *
+ * Every player carries `spinWeight`, persisted in the state. On each spin:
+ *   picked player      weight = max(MIN, weight * PICKED_DECAY)
+ *   everyone else      weight = min(MAX, weight * RECOVERY)
+ * then a weighted draw over the living players. The clamp at MIN is what
+ * keeps a re-pick possible rather than impossible; the clamp at MAX stops a
+ * long-ignored player becoming a certainty. Seeded equal at start_game.
+ */
+const SPIN_WEIGHT_INITIAL = 1.0;
+const SPIN_WEIGHT_MIN = 0.15;
+const SPIN_WEIGHT_MAX = 2.5;
+const SPIN_WEIGHT_PICKED_DECAY = 0.35;
+const SPIN_WEIGHT_RECOVERY = 1.25;
+
+/**
+ * QUOTA — betting odds derived from the target's IN-MATCH accuracy, which is
+ * why every player carries `stats.correct` / `stats.wrong`. room.ts counted
+ * only wrong answers, so there was no denominator to compute this from.
+ * Betting into a central `pot` and paying winners out of it is what conserves
+ * money and makes elimination inevitable; there is no separate house edge.
+ */
+const QUOTA_MIN = 1.1;
+const QUOTA_MAX = 2.0;
+
+/** a stale match should not outlive the day it was played */
+const STATE_TTL_SECONDS = 24 * 60 * 60;
+/** how many times a version-conflicted write is retried before giving up */
+const STATE_MAX_ATTEMPTS = 5;
+
+/**
+ * Turn-engine actions still awaiting P2.2+. `start_game` used to be the tenth
+ * entry here; it is handled for real now (it seeds the match state), so it is
+ * dispatched before this set is consulted.
+ */
 const TURN_ENGINE_ACTIONS = new Set([
-  "start_game",
   "submit_answer",
   "place_bet",
   "pick_player",
@@ -360,6 +422,261 @@ async function walletProfile(username) {
   } catch {
     return { streak: 0, avatar: null };
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GAME STATE — the P2.0 backbone
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// One item per lobby in the GameState table, PK `lobbyId`, holding everything
+// GameRoom kept in memory. The shape below is ported field-for-field from
+// src/server/game/room.ts, with the P2 additions Matija locked in marked NEW.
+//
+//   lobbyId        S   partition key, the same id used everywhere else
+//   version        N   optimistic lock — every write asserts the value it read
+//   matchId        S   fresh per start_game, not per lobby (room.ts matchId)
+//   phase          S   lobby|countdown|spin|question|betting|reveal|
+//                      picking|duel|gameover  (the 9 from types.ts GamePhase)
+//   phaseEndsAt    N   NEW absolute epoch ms. room.ts used setTimeout, which a
+//                      Lambda cannot hold; this is what P2.1's scheduler fires
+//                      on, and it is why every phase now has a real deadline —
+//                      including `betting`, which room.ts never gave one.
+//   round          N   rounds elapsed
+//   chainDepth     N   drives difficulty (1 + floor(depth/2)) and the clock
+//   pot            N   NEW central pot. Stakes go in, winners are paid out of
+//                      it, scaled down if it cannot cover — money conserved.
+//   players[]          username, displayName, avatar, money, alive, connected,
+//                      isHost, isSpectator, streak,
+//                      spinWeight  NEW per-player decaying selection weight
+//                      stats { correct NEW, wrong, betsWon, maxBetWin,
+//                              roundsPlayed }  — correct/wrong feed the quota
+//   lastSpinTarget S   kept for continuity; spinWeight supersedes it
+//   turn               { answering, question{...}, askedAt, answerTimeMs,
+//                        answer, answeredInMs } — `answer` is the submitted
+//                        answer, held hidden until reveal exactly as room.ts
+//                        does during the betting pause
+//   bets[]             NEW { username, side: correct|wrong, amount, quota }
+//                      — a list, not a Map, because Maps do not serialise
+//   duel               { kind: guess|code, players[2], endsAt, question,
+//                        guesses{}, code[], attempts{} }
+//   currentSpin        { target, endsAt }        for reconnect resync
+//   currentPick        { picker, choices[], endsAt }
+//   deck               { fresh[], used[] } question ids — populated in P2.2
+//   chat[]             ring buffer, last CHAT_HISTORY_LIMIT entries
+//   startedAt/updatedAt N
+//   expiresAt      N   TTL, 24h
+//
+// Nothing here runs the game yet. P2.0 proves the state exists, round-trips,
+// and cannot be corrupted by two writers.
+
+function nowMs() { return Date.now(); }
+function ttlFrom(now) { return Math.floor(now / 1000) + STATE_TTL_SECONDS; }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * A fresh match, seeded from the Lobbies roster.
+ *
+ * Only players who are BOTH on the roster and currently holding a socket are
+ * seated — room.ts does the same thing ("only players present at the start
+ * participate") by deleting disconnected players in startGame().
+ */
+function initialGameState(lobby, lobbyId, connRows) {
+  const now = nowMs();
+  const live = new Map();
+  for (const c of connRows) if (c.username) live.set(c.username, c);
+
+  const roster = Array.isArray(lobby?.players) ? lobby.players : [];
+  const players = roster
+    .filter((seat) => live.has(String(seat.player)))
+    .map((seat) => {
+      const username = String(seat.player);
+      const conn = live.get(username);
+      return {
+        username,
+        displayName: conn?.displayName || username,
+        avatar: conn?.avatar ?? null,
+        money: STARTING_MONEY,
+        alive: true,
+        connected: true,
+        isHost: seat.role === "Admin",
+        isSpectator: false,
+        streak: Number(conn?.streak ?? 0),
+        // NEW — equal at the start, diverges from the first spin onward
+        spinWeight: SPIN_WEIGHT_INITIAL,
+        // `correct` is the counter room.ts never kept; without it there is no
+        // denominator for an accuracy-derived quota
+        stats: { correct: 0, wrong: 0, betsWon: 0, maxBetWin: 0, roundsPlayed: 0 },
+      };
+    });
+
+  return {
+    lobbyId,
+    version: 0,
+    matchId: crypto.randomUUID(),
+    code: Number(lobby?.code ?? 0),
+    roomName: lobby?.roomName ?? `Room ${lobby?.code ?? ""}`.trim(),
+    maxPlayers: capacityOf(lobby),
+    minPlayers: MIN_PLAYERS,
+
+    phase: "countdown",
+    phaseEndsAt: now + COUNTDOWN_MS,
+    round: 0,
+    chainDepth: 0,
+    pot: 0,
+
+    players,
+    lastSpinTarget: null,
+
+    turn: null,
+    bets: [],
+    duel: null,
+    currentSpin: null,
+    currentPick: null,
+    deck: { fresh: [], used: [] },
+    chat: [],
+
+    startedAt: now,
+    updatedAt: now,
+    expiresAt: ttlFrom(now),
+  };
+}
+
+/** what goes over the wire — secrets stripped, never the raw item */
+function publicGameState(s) {
+  return {
+    lobbyId: s.lobbyId,
+    version: s.version,
+    matchId: s.matchId,
+    phase: s.phase,
+    phaseEndsAt: s.phaseEndsAt,
+    round: s.round,
+    chainDepth: s.chainDepth,
+    pot: s.pot,
+    code: s.code,
+    roomName: s.roomName,
+    minPlayers: s.minPlayers,
+    maxPlayers: s.maxPlayers,
+    players: (s.players ?? []).map((p) => ({
+      username: p.username,
+      displayName: p.displayName,
+      avatar: p.avatar,
+      money: p.money,
+      alive: p.alive,
+      connected: p.connected,
+      isHost: p.isHost,
+      isSpectator: p.isSpectator,
+      streak: p.streak,
+      spinWeight: p.spinWeight,
+      stats: p.stats,
+    })),
+    // the submitted answer and the duel code stay server-side until reveal,
+    // mirroring room.ts hiding `turn.answer` through the betting pause
+    turn: s.turn
+      ? {
+          answering: s.turn.answering,
+          question: s.turn.question
+            ? {
+                text: s.turn.question.text,
+                options: s.turn.question.options,
+                difficulty: s.turn.question.difficulty,
+              }
+            : null,
+          askedAt: s.turn.askedAt,
+          answerTimeMs: s.turn.answerTimeMs,
+          hasAnswered: s.turn.answer !== null && s.turn.answer !== undefined,
+        }
+      : null,
+    bets: (s.bets ?? []).map((b) => ({
+      username: b.username,
+      amount: b.amount,
+      quota: b.quota,
+    })),
+    duel: s.duel
+      ? { kind: s.duel.kind, players: s.duel.players, endsAt: s.duel.endsAt }
+      : null,
+    currentSpin: s.currentSpin,
+    currentPick: s.currentPick,
+  };
+}
+
+async function readGameState(lobbyId) {
+  const res = await ddb.send(
+    new GetCommand({ TableName: GAME_STATE_TABLE, Key: { lobbyId } })
+  );
+  return res.Item ?? null;
+}
+
+/** create-once. Two simultaneous start_game calls: exactly one wins. */
+async function createGameState(state) {
+  await ddb.send(
+    new PutCommand({
+      TableName: GAME_STATE_TABLE,
+      Item: state,
+      ConditionExpression: "attribute_not_exists(lobbyId)",
+    })
+  );
+  return state;
+}
+
+/**
+ * THE CONCURRENCY BACKBONE — read → modify → conditional write on `version`.
+ *
+ * Six players can act in the same instant and each acts through its own
+ * Lambda, so "read the room, change a field, write it back" is a lost-update
+ * race by default. Every write here asserts that `version` still holds the
+ * value this invocation read; if another writer got in first the condition
+ * fails, and we re-read and replay the mutation against the NEW state rather
+ * than clobbering it. That is what turns each field mutation in room.ts into
+ * something safe to run twelve times concurrently.
+ *
+ * `mutate(state)` receives a private copy and returns the next state, or null
+ * to abort without writing (used for "the rules say no" outcomes).
+ *
+ * Returns { ok, state, attempts } or { ok: false, reason }.
+ */
+async function mutateGameState(lobbyId, mutate) {
+  for (let attempt = 1; attempt <= STATE_MAX_ATTEMPTS; attempt++) {
+    const current = await readGameState(lobbyId);
+    if (!current) return { ok: false, reason: "no_state" };
+
+    const expected = Number(current.version ?? 0);
+    const next = await mutate(structuredClone(current));
+    if (!next) return { ok: false, reason: "aborted", state: current, attempts: attempt };
+
+    next.version = expected + 1;
+    next.updatedAt = nowMs();
+    next.expiresAt = ttlFrom(next.updatedAt);
+
+    try {
+      await ddb.send(
+        new PutCommand({
+          TableName: GAME_STATE_TABLE,
+          Item: next,
+          ConditionExpression: "#v = :expected",
+          ExpressionAttributeNames: { "#v": "version" },
+          ExpressionAttributeValues: { ":expected": expected },
+        })
+      );
+      return { ok: true, state: next, attempts: attempt };
+    } catch (err) {
+      if (err?.name !== "ConditionalCheckFailedException") throw err;
+      // somebody else wrote between our read and our write — jittered backoff
+      // so six retrying writers do not synchronise into a thundering herd
+      console.warn(
+        `version conflict on ${lobbyId} (expected ${expected}), attempt ${attempt}`
+      );
+      await sleep(15 * attempt + Math.floor(Math.random() * 25));
+    }
+  }
+  return { ok: false, reason: "contended" };
+}
+
+/** push the current state to everyone in the lobby */
+async function broadcastGameState(event, lobbyId, state) {
+  await broadcast(event, lobbyId, {
+    type: "game_state",
+    state: publicGameState(state),
+  });
 }
 
 // ─── presence ──────────────────────────────────────────────────────────────
@@ -737,6 +1054,11 @@ async function closeRoom(event, lobbyId, reason) {
   await ddb.send(
     new DeleteCommand({ TableName: LOBBIES_TABLE, Key: { lobby_id: lobbyId } })
   );
+  // the match state dies with the room; without this a closed room leaves an
+  // orphaned GameState item behind until its 24h TTL reaps it
+  await ddb
+    .send(new DeleteCommand({ TableName: GAME_STATE_TABLE, Key: { lobbyId } }))
+    .catch((err) => console.error("failed to delete game state", lobbyId, err));
 
   const rows = await connectionsInLobby(lobbyId);
   await Promise.all(
@@ -772,6 +1094,7 @@ const HOST_ONLY_ACTIONS = new Set([
   "start_game",
   "kick_player",
   "terminate_lobby",
+  "advance_phase", // P2.0 scaffold — goes away with the scheduler
 ]);
 
 /** English-neutral; the client localises off `reason` + `action` */
@@ -779,6 +1102,7 @@ const HOST_ONLY_MESSAGE = {
   start_game: "Only the room host can start the game.",
   kick_player: "Only the room host can remove players.",
   terminate_lobby: "Only the room host can close the room.",
+  advance_phase: "Only the room host can advance the match.",
 };
 
 async function requireHost(event, connectionId, row, action) {
@@ -859,6 +1183,129 @@ async function onLeave(event, connectionId, row) {
 }
 
 /**
+ * start_game — P2.0: build the state item, announce it, return.
+ *
+ * Host-gated upstream by requireHost(). No turn logic runs here: the match is
+ * created in `countdown` with a real deadline and stops. What advances it is
+ * P2.1's scheduler; until then, `advance_phase` below does it by hand.
+ */
+async function onStartGame(event, connectionId, row) {
+  const lobbyId = row.lobbyId;
+  const lobby = await resolveLobby(lobbyId);
+  if (!lobby) {
+    await postTo(event, connectionId, {
+      type: "error", reason: "room_not_found", action: "start_game",
+      message: "That room no longer exists.",
+    });
+    return;
+  }
+
+  const conns = await connectionsInLobby(lobbyId);
+  const draft = initialGameState(lobby, lobbyId, conns);
+  if (draft.players.length < MIN_PLAYERS) {
+    await postTo(event, connectionId, {
+      type: "error", reason: "too_few_players", action: "start_game",
+      message: `Need at least ${MIN_PLAYERS} connected players to start.`,
+    });
+    return;
+  }
+
+  const existing = await readGameState(lobbyId);
+  if (existing && existing.phase !== "lobby" && existing.phase !== "gameover") {
+    await postTo(event, connectionId, {
+      type: "error", reason: "already_running", action: "start_game",
+      message: "A match is already in progress in this room.",
+    });
+    return;
+  }
+
+  let state;
+  if (existing) {
+    // a finished match is replaced under the lock, so two hosts hitting start
+    // at once cannot both seed a match
+    const res = await mutateGameState(lobbyId, () => draft);
+    if (!res.ok) {
+      await postTo(event, connectionId, {
+        type: "error", reason: res.reason, action: "start_game",
+        message: "Could not start the match, please try again.",
+      });
+      return;
+    }
+    state = res.state;
+  } else {
+    try {
+      state = await createGameState(draft);
+    } catch (err) {
+      if (err?.name === "ConditionalCheckFailedException") {
+        await postTo(event, connectionId, {
+          type: "error", reason: "already_running", action: "start_game",
+          message: "A match is already in progress in this room.",
+        });
+        return;
+      }
+      throw err;
+    }
+  }
+
+  await broadcastGameState(event, lobbyId, state);
+  await systemChat(event, lobbyId, "The match is starting…");
+}
+
+/**
+ * advance_phase — P2.0 SCAFFOLD, host-gated, to be deleted in P2.1.
+ *
+ * Moves the phase machine one step and re-stamps `phaseEndsAt`, so state
+ * transitions and the version lock can be exercised end-to-end before a
+ * scheduler exists. It runs NO game logic: nothing is drawn, nobody is picked,
+ * no money moves. P2.1 replaces this with Step Functions firing on
+ * `phaseEndsAt`, and the per-phase logic lands with it.
+ */
+const NEXT_PHASE = {
+  countdown: "spin",
+  spin: "question",
+  question: "betting",
+  betting: "reveal",
+  reveal: "picking",
+  picking: "spin",
+  duel: "reveal",
+};
+
+function phaseDuration(phase, chainDepth) {
+  switch (phase) {
+    case "countdown": return COUNTDOWN_MS;
+    case "spin": return SPIN_TIME_MS;
+    case "question": return questionTimeFor(chainDepth);
+    case "betting": return BETTING_TIME_MS;
+    case "reveal": return REVEAL_MS;
+    case "picking": return PICK_TIME_MS;
+    case "duel": return DUEL_TIME_MS;
+    default: return 0;
+  }
+}
+
+async function onAdvancePhase(event, connectionId, row) {
+  const res = await mutateGameState(row.lobbyId, (s) => {
+    const next = NEXT_PHASE[s.phase];
+    if (!next) return null; // gameover / lobby — nothing to advance
+    s.phase = next;
+    s.phaseEndsAt = nowMs() + phaseDuration(next, s.chainDepth);
+    if (next === "question") s.round += 1;
+    return s;
+  });
+
+  if (!res.ok) {
+    await postTo(event, connectionId, {
+      type: "error", reason: res.reason, action: "advance_phase",
+      message: res.reason === "no_state"
+        ? "No match is running in this room."
+        : "Could not advance the phase.",
+    });
+    return;
+  }
+  await broadcastGameState(event, row.lobbyId, res.state);
+}
+
+/**
  * $default — every message lands here. The API's route selection expression is
  * $request.body.type, but with only $connect/$disconnect/$default configured
  * there is nothing else for a typed message to match, which is what makes one
@@ -909,6 +1356,14 @@ async function onDefault(event) {
       // the host gate runs BEFORE anything else these actions would do, and
       // stays in front of the turn engine when Phase 2 lands here
       if (HOST_ONLY_ACTIONS.has(type) && !(await requireHost(event, connectionId, row, type))) {
+        break;
+      }
+      if (type === "start_game") {
+        await onStartGame(event, connectionId, row);
+        break;
+      }
+      if (type === "advance_phase") {
+        await onAdvancePhase(event, connectionId, row);
         break;
       }
       if (TURN_ENGINE_ACTIONS.has(type)) {
