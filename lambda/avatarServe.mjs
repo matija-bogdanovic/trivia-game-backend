@@ -81,10 +81,13 @@
  *   The API Gateway path parameter MUST be named {username} — the handler
  *   reads event.pathParameters.username.
  *
- *   s3:ListBucket is deliberately omitted from the IAM policy above: without
- *   it, a GetObject on a key this role CAN read still returns a clean
- *   NoSuchKey (-> 404) when the object is missing, which is what this
- *   handler expects.
+ *   s3:ListBucket on the BUCKET (not the objects) is required, even though
+ *   this handler never lists anything. S3 decides what a GetObject on a
+ *   missing key returns based on it: with ListBucket you get NoSuchKey
+ *   (404, which is what this handler maps to a clean 404); WITHOUT it S3
+ *   returns AccessDenied (403) instead, so as not to reveal whether the
+ *   object exists — and this handler would surface that as a 500. Verified
+ *   the hard way against the live bucket. lambda/iam-policy.json grants it.
  *
  * Ported from: getAvatarImageHandler in src/server/apis/avatars.ts
  * ===========================================================================

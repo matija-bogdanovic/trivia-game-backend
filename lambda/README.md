@@ -111,15 +111,22 @@ wildcards, every statement scoped to a specific ARN.
 | --- | --- | --- | --- |
 | `CloudWatchLogGroup` / `CloudWatchLogStreams` | `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents` | `/aws/lambda/*` log groups | all 16 (`console.error`) |
 | `AvatarObjects` | `s3:GetObject`, `s3:PutObject` | `arn:aws:s3:::ipak-se-okrece-avatars/avatars/*` | avatarServe (Get), avatarUpload (Put) |
+| `AvatarMissingKeyReturns404` | `s3:ListBucket` | `arn:aws:s3:::ipak-se-okrece-avatars` (the bucket) | avatarServe — see the note below |
 | `WalletsTable` | `dynamodb:GetItem`, `PutItem`, `UpdateItem`, `Scan` | `…:table/Wallets` | wallet, shopBuy, friendsList, friendsAction, createRoom (Get/Put); avatarUpload (Put/Update); leaderboard (Scan) |
 | `LobbiesTable` | `dynamodb:PutItem`, `UpdateItem`, `Scan` | `…:table/Lobbies` | createRoom (Put); joinRoom, leaveRoom (Update); lobbies, getActiveRooms (Scan) |
 | `LobbiesIndexes` | `dynamodb:Query` | `…:table/Lobbies/index/code-index` and `…/admin-index` | getRoomDetails, joinRoom, leaveRoom (code-index); getRoomCode (admin-index) |
 | `MatchesTable` | `dynamodb:GetItem` | `…:table/Matches` | matchDetail |
 
+`s3:ListBucket` is granted on the **bucket** even though no handler ever lists
+anything, because S3 decides what a `GetObject` on a *missing* key returns based
+on it: with `ListBucket` you get `NoSuchKey` (404), which `avatarServe` maps to
+a clean 404; without it S3 answers `AccessDenied` (403) instead, so as not to
+reveal whether the object exists, and the handler surfaces that as a 500. An
+earlier version of this file claimed the opposite and omitted the permission —
+that was wrong, and it made every missing avatar a 500 on the live API.
+
 Deliberately **absent**:
 
-- **`s3:ListBucket`** — not needed, and leaving it out is what makes a missing
-  avatar return a clean `NoSuchKey` → 404 instead of a 403.
 - **`dynamodb:DeleteItem`** — no handler deletes anything. (The Express server's
   policy in [`render-deployment.md`](../docs/render-deployment.md) has it; these
   Lambdas don't need it.)

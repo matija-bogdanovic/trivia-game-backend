@@ -20,6 +20,12 @@
       "Resource": "arn:aws:s3:::ipak-se-okrece-avatars/avatars/*"
     },
     {
+      "Sid": "AvatarMissingKeyReturns404",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::ipak-se-okrece-avatars"
+    },
+    {
       "Sid": "WalletsTable",
       "Effect": "Allow",
       "Action": [
