@@ -156,6 +156,8 @@ const CODE_DUEL_TIME_MS = 90000;
 const MATH_QUESTION_CHANCE = 0.3;
 /** what a wrong answer or a timeout costs the answerer */
 const WRONG_ANSWER_COST = 100;
+/** smallest stake, and the floor for being counted as an eligible bettor */
+const MIN_BET = 10;
 
 /** a question's clock shrinks as the chain deepens (room.ts askQuestion) */
 function questionTimeFor(chainDepth) {
@@ -190,6 +192,14 @@ const SPIN_WEIGHT_RECOVERY = 1.25;
  */
 const QUOTA_MIN = 1.1;
 const QUOTA_MAX = 2.0;
+/**
+ * Pseudo-observations of a 50% player mixed into every accuracy estimate, so a
+ * player with no history quotes exactly even money and the odds firm up as
+ * evidence arrives instead of swinging on a single answer. 4 means one correct
+ * answer moves the estimate to 0.6, not to 1.0 — a min-sample fallback that
+ * degrades smoothly rather than switching on at a threshold.
+ */
+const QUOTA_PRIOR_WEIGHT = 4;
 
 /** a stale match should not outlive the day it was played */
 const STATE_TTL_SECONDS = 24 * 60 * 60;
@@ -202,7 +212,6 @@ const STATE_MAX_ATTEMPTS = 5;
  * dispatched before this set is consulted.
  */
 const TURN_ENGINE_ACTIONS = new Set([
-  "place_bet",
   "submit_guess",
   "submit_code",
   "play_again",
@@ -617,11 +626,18 @@ function publicGameState(s) {
           hasAnswered: s.turn.answer !== null && s.turn.answer !== undefined,
         }
       : null,
+    // which SIDE each player took stays hidden while betting is open — it is
+    // live strategic information — and is revealed once the turn resolves
     bets: (s.bets ?? []).map((b) => ({
       username: b.username,
       amount: b.amount,
       quota: b.quota,
+      ...(s.phase === "reveal" || s.phase === "gameover" ? { side: b.side } : {}),
     })),
+    // the price on offer right now, so a client can label the two buttons
+    quotas:
+      s.phase === "question" || s.phase === "betting" ? quotasFor(s) : null,
+    betResults: s.phase === "reveal" ? s.betResults ?? [] : null,
     duel: s.duel
       ? { kind: s.duel.kind, players: s.duel.players, endsAt: s.duel.endsAt }
       : null,
@@ -868,6 +884,141 @@ function weightedPick(alive) {
   return alive[alive.length - 1];
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// THE POT — betting, quotas, settlement
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// THE INVARIANT, and the whole point of this step:
+//
+//     sum(players[].money) + pot   is constant for the entire match
+//
+// Nothing is created and nothing is destroyed. A stake leaves the bettor and
+// enters the pot; a payout leaves the pot and enters the winner; a wrong
+// answer's penalty leaves the answerer and ENTERS THE POT rather than
+// vanishing. room.ts did the opposite on both counts — it paid winners out of
+// nowhere and deleted the wrong-answer penalty — which is why money there
+// could inflate and why nothing guaranteed anyone reached zero.
+//
+// Money still concentrates: individuals are eliminated at 0 and the survivor
+// ends up holding it. That is the poker model Matija asked for, and it needs
+// no house edge to terminate.
+
+/** alive, not the one answering, and holding at least the minimum stake */
+function bettorsFor(state) {
+  const t = state.turn;
+  if (!t) return [];
+  return livingPlayers(state).filter(
+    (p) => p.username !== t.answering && p.money >= MIN_BET
+  );
+}
+
+/** eligible players who have not yet declared (a stake OR an abstain) */
+function pendingBettors(state) {
+  const placed = new Set((state.bets ?? []).map((b) => b.username));
+  return bettorsFor(state).filter((p) => !placed.has(p.username));
+}
+
+/** smoothed in-match accuracy of a player: correct / (correct + wrong) */
+function accuracyOf(player) {
+  const c = Number(player?.stats?.correct ?? 0);
+  const w = Number(player?.stats?.wrong ?? 0);
+  return (c + QUOTA_PRIOR_WEIGHT * 0.5) / (c + w + QUOTA_PRIOR_WEIGHT);
+}
+
+/**
+ * Quotas for the current turn, derived from the ANSWERING player's accuracy.
+ *
+ * A quota is the GROSS return multiple: the stake has already gone into the
+ * pot, so a winner receives stake × quota back. The fair price of an outcome
+ * with probability q is 1/q — which makes an even-money 50/50 pay exactly 2.0,
+ * the cap. Betting the likely outcome therefore pays LESS than double, and the
+ * unlikely one is pinned at the 2.0 ceiling.
+ *
+ *   answerer 80% accurate →  correct 1.25×   wrong 2.00× (capped from 5.0)
+ *   answerer 50% accurate →  correct 2.00×   wrong 2.00×
+ *   answerer 20% accurate →  correct 2.00×   wrong 1.25×
+ *
+ * The quota is LOCKED onto each bet when it is placed, never recomputed at
+ * settlement — by then the answerer's stats already include the very outcome
+ * being paid out, which would price the bet using its own result.
+ */
+function quotasFor(state) {
+  const t = state.turn;
+  const answerer = t
+    ? (state.players ?? []).find((p) => p.username === t.answering)
+    : null;
+  const p = answerer ? accuracyOf(answerer) : 0.5;
+  const price = (q) =>
+    Math.round(Math.min(QUOTA_MAX, Math.max(QUOTA_MIN, 1 / Math.max(q, 0.01))) * 100) / 100;
+  return {
+    correct: price(p),
+    wrong: price(1 - p),
+    accuracy: Math.round(p * 1000) / 1000,
+  };
+}
+
+/**
+ * Pay the winners out of the pot, exactly once per turn.
+ *
+ * If the pot cannot cover everything owed, every payout is scaled down by the
+ * same factor — the pot is a hard ceiling, so it can never be overdrawn. Any
+ * remainder (losers' stakes, rounding dust, an unclaimed surplus) simply stays
+ * in the pot and carries into the next round.
+ */
+function settleBets(state) {
+  const t = state.turn;
+  if (!t || t.betsSettled) return [];
+
+  const staked = (state.bets ?? []).filter(
+    (b) => b.side === "correct" || b.side === "wrong"
+  );
+  const isWinner = (b) => (b.side === "correct") === Boolean(t.correct);
+
+  const owed = staked
+    .filter(isWinner)
+    .reduce((sum, b) => sum + b.amount * b.quota, 0);
+  const pot = Number(state.pot ?? 0);
+  const payable = Math.min(owed, pot);
+  const scale = owed > 0 ? payable / owed : 0;
+
+  const results = [];
+  for (const b of staked) {
+    const won = isWinner(b);
+    let payout = 0;
+    if (won) {
+      // floor, so the sum of payouts can never exceed `payable`
+      payout = Math.floor(b.amount * b.quota * scale);
+      const p = (state.players ?? []).find((x) => x.username === b.username);
+      if (p) {
+        p.money += payout;
+        state.pot = Number(state.pot ?? 0) - payout;
+        p.stats = p.stats ?? { correct: 0, wrong: 0, betsWon: 0, maxBetWin: 0, roundsPlayed: 0 };
+        p.stats.betsWon = Number(p.stats.betsWon ?? 0) + 1;
+        p.stats.maxBetWin = Math.max(Number(p.stats.maxBetWin ?? 0), payout - b.amount);
+      }
+    }
+    results.push({
+      username: b.username,
+      side: b.side,
+      amount: b.amount,
+      quota: b.quota,
+      won,
+      payout,
+      net: payout - b.amount,
+    });
+  }
+
+  t.betsSettled = true;
+  t.betScale = Math.round(scale * 1000) / 1000;
+  state.betResults = results;
+  return results;
+}
+
+function enterBetting(state) {
+  setPhase(state, "betting", BETTING_TIME_MS);
+  return state;
+}
+
 function enterGameOver(state) {
   const ranked = [...(state.players ?? [])]
     .filter((p) => !p.isSpectator)
@@ -925,6 +1076,9 @@ function enterQuestion(state, username, pool) {
     timedOut: null,
     answererDelta: 0,
   };
+  // a fresh betting book each turn; the POT deliberately carries over
+  state.bets = [];
+  state.betResults = [];
   state.currentSpin = null;
   state.currentPick = null;
   setPhase(state, "question", answerTimeMs);
@@ -948,11 +1102,19 @@ function enterReveal(state) {
       player.stats.correct = Number(player.stats.correct ?? 0) + 1;
     } else {
       player.stats.wrong = Number(player.stats.wrong ?? 0) + 1;
-      const delta = -Math.min(WRONG_ANSWER_COST, player.money);
-      player.money = Math.max(0, player.money + delta);
-      t.answererDelta = delta;
+      const penalty = Math.min(WRONG_ANSWER_COST, player.money);
+      player.money = Math.max(0, player.money - penalty);
+      // INTO THE POT, not deleted. room.ts destroyed this money; keeping it in
+      // the pot is what makes sum(money) + pot invariant, and it means a table
+      // full of wrong answers funds the next round's winners.
+      state.pot = Number(state.pot ?? 0) + penalty;
+      t.answererDelta = -penalty;
     }
   }
+
+  // pay the bets before checking for broke players, so a winner whose payout
+  // rescues them from zero is not eliminated a moment before being paid
+  settleBets(state);
 
   // elimination wiring — P2.4 finalises standings and persistence
   state.eliminated = [];
@@ -997,6 +1159,10 @@ function advanceOnDeadline(state, pool) {
     case "spin":
       return enterQuestion(state, state.currentSpin?.target, pool);
     case "question":
+      // ran out of time without answering — room.ts holds no betting pause in
+      // that case either, so whatever is on the book settles as it stands
+      return enterReveal(state);
+    case "betting":
       return enterReveal(state);
     case "reveal":
       return afterReveal(state, pool);
@@ -1086,10 +1252,21 @@ function phaseMessage(state) {
         difficulty: state.turn?.question?.difficulty,
         answerTimeMs: Math.max(0, Number(state.phaseEndsAt) - nowMs()),
       };
+    case "betting":
+      return {
+        type: "bet_start",
+        target: state.turn?.answering,
+        betTimeMs: Math.max(0, Number(state.phaseEndsAt) - nowMs()),
+        pot: Number(state.pot ?? 0),
+        quotas: quotasFor(state),
+      };
     case "reveal":
       return {
         type: "round_result",
         round: state.round,
+        pot: Number(state.pot ?? 0),
+        bets: state.betResults ?? [],
+        betScale: Number(state.turn?.betScale ?? 1),
         chainDepth: state.chainDepth,
         answering: state.turn?.answering,
         answer: state.turn?.answer ?? null,
@@ -1791,12 +1968,84 @@ async function onSubmitAnswer(event, connectionId, row, msg) {
     if (nowMs() > Number(s.phaseEndsAt ?? 0)) return null; // too late — the timer owns it
     s.turn.answer = answer;
     s.turn.answeredInMs = nowMs() - Number(s.turn.askedAt ?? nowMs());
-    return enterReveal(s);
+    // the answer stays hidden while the last bets come in — room.ts's "last
+    // call" pause. If nobody is left to bet, resolve straight through.
+    return pendingBettors(s).length > 0 ? enterBetting(s) : enterReveal(s);
   });
 
   if (!res.ok) return; // not their turn, already answered, or past the buzzer
   await broadcastPhase(event, row.lobbyId, res.state);
   await rearmPhaseTimer(res.state, before?.executionArn);
+}
+
+/**
+ * place_bet — stake on whether the answering player gets it right.
+ *
+ * Open from the moment the question appears until the betting pause closes.
+ * ONE declaration per player per turn, no raising: the quota is locked when
+ * the bet is placed, so allowing a raise would mean either re-pricing an
+ * accepted bet or carrying two quotas for one player. Abstaining ("neutral")
+ * counts as a declaration but stakes nothing — it is what lets the pause end
+ * early once everyone has decided.
+ *
+ * The stake leaves the player and enters the pot here, not at settlement, so
+ * the money is visibly committed and cannot be spent twice.
+ */
+async function onPlaceBet(event, connectionId, row, msg) {
+  if (!row?.username || !row?.lobbyId) {
+    await postTo(event, connectionId, {
+      type: "error", reason: "not_joined", action: "place_bet",
+      message: "Join the room before doing that.",
+    });
+    return;
+  }
+  const side = String(msg.side ?? msg.bet ?? "");
+  const before = await readGameState(row.lobbyId);
+  let closedEarly = false;
+
+  const res = await mutateGameState(row.lobbyId, (s) => {
+    if (s.phase !== "question" && s.phase !== "betting") return null;
+    if (!s.turn) return null;
+    if (nowMs() > Number(s.phaseEndsAt ?? 0)) return null; // past the deadline
+    if (!["correct", "wrong", "neutral"].includes(side)) return null;
+    if (s.turn.answering === row.username) return null;    // can't bet on yourself
+
+    s.bets = s.bets ?? [];
+    if (s.bets.some((b) => b.username === row.username)) return null; // already declared
+
+    const player = (s.players ?? []).find((p) => p.username === row.username);
+    if (!player || !player.alive) return null;
+
+    if (side === "neutral") {
+      s.bets.push({ username: row.username, side: "neutral", amount: 0, quota: 0 });
+    } else {
+      if (player.money < MIN_BET) return null;
+      const allIn = msg.amount === "all" || msg.allIn === true;
+      const raw = allIn ? player.money : Math.floor(Number(msg.amount) || 0);
+      const amount = Math.min(player.money, Math.max(MIN_BET, raw));
+      const quota = quotasFor(s)[side];
+      player.money -= amount;                          // out of the pocket…
+      s.pot = Number(s.pot ?? 0) + amount;             // …and into the pot
+      s.bets.push({ username: row.username, side, amount, quota });
+    }
+
+    // last one in during the pause? close it rather than burn the clock
+    if (s.phase === "betting" && pendingBettors(s).length === 0) {
+      closedEarly = true;
+      return enterReveal(s);
+    }
+    return s;
+  });
+
+  if (!res.ok) return; // ineligible, already declared, or too late — silent
+  await broadcast(event, row.lobbyId, {
+    type: "player_bet",
+    username: row.username,
+    betCount: (res.state.bets ?? []).length,
+    pot: res.state.pot,
+  });
+  await broadcastPhase(event, row.lobbyId, res.state);
+  if (closedEarly) await rearmPhaseTimer(res.state, before?.executionArn);
 }
 
 /**
@@ -1887,6 +2136,10 @@ async function onDefault(event) {
       }
       if (type === "submit_answer") {
         await onSubmitAnswer(event, connectionId, row, msg);
+        break;
+      }
+      if (type === "place_bet") {
+        await onPlaceBet(event, connectionId, row, msg);
         break;
       }
       if (type === "pick_player") {
