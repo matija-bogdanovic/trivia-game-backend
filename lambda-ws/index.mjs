@@ -1,6 +1,6 @@
 /**
  * ===========================================================================
- * ipakseokrece — WebSocket Lambda  (Phase 0: connect · join · presence · chat)
+ * ipakseokrece — WebSocket Lambda  (through P2.3: the picking-phase modes)
  * ===========================================================================
  * ONE function behind an API Gateway **WebSocket** API, wired to all three
  * routes ($connect / $disconnect / $default). It is deliberately separate from
@@ -17,18 +17,25 @@
  * │           and host-leaves-closes-the-room (`room_closed`).              │
  * │ ENFORCES: host-only actions — `start_game`, `kick_player` and           │
  * │           `terminate_lobby` are refused with reason "not_host" unless   │
- * │           the sender is the room's Admin. Server-side and permanent:    │
- * │           the gate stays in front of the turn engine in Phase 2.        │
- * │ DOES NOT: the turn engine. `start_game`, `submit_answer`, `place_bet`,  │
- * │           `pick_player`, `submit_guess`, `submit_code`, `play_again`,   │
- * │           `kick_player`, `terminate_lobby` all answer                   │
- * │           { type: "not_implemented" } — on purpose, so the plumbing is  │
- * │           provable end-to-end before any of that is written.            │
- * │           Why: docs/websocket-game-later.md — the phases are driven by  │
- * │           in-process setTimeout()s, which a Lambda cannot hold. That    │
- * │           needs Step Functions (or EventBridge Scheduler) and a room    │
- * │           item written with a version + conditional update. Phase 1+.   │
+ * │           the sender is the room's Admin. Server-side and permanent.    │
+ * │ RUNS:     the turn engine. P2.0 durable state on optimistic locks ·     │
+ * │           P2.1 the round loop on a Step Functions phase scheduler, so   │
+ * │           every phase has an ABSOLUTE deadline instead of a setTimeout  │
+ * │           no Lambda could hold · P2.2 the central pot, accuracy-derived │
+ * │           quotas and conserved settlement · P2.3 the picking-phase      │
+ * │           CHALLENGE / DUEL choice.                                      │
+ * │ DOES NOT: `play_again`, `kick_player`, `terminate_lobby` and the OLD    │
+ * │           guess/code duel (`submit_guess`, `submit_code`) still answer  │
+ * │           { type: "not_implemented" } — see TURN_ENGINE_ACTIONS.        │
+ * │           Elimination-at-0 is wired but standings/persistence are P2.4. │
  * └────────────────────────────────────────────────────────────────────────┘
+ *
+ * ── THE INVARIANT EVERY STEP MUST PRESERVE ────────────────────────────────
+ *     sum(players[].money) + pot  is constant from start_game to game_over.
+ * Stakes, antes and penalties move money INTO the pot; payouts move it OUT.
+ * Nothing is minted and nothing is deleted, which is what makes elimination
+ * inevitable without a house edge. Every new money path added below is
+ * written as a transfer for exactly that reason.
  *
  * ── ENVIRONMENT VARIABLES ─────────────────────────────────────────────────
  *   CONNECTIONS_TABLE        Connections          (this file's own table)
@@ -159,6 +166,29 @@ const WRONG_ANSWER_COST = 100;
 /** smallest stake, and the floor for being counted as an eligible bettor */
 const MIN_BET = 10;
 
+// ─── P2.3: the picking-phase mode choice ───────────────────────────────────
+/**
+ * A picked question is HARDER than the chain's baseline, in both modes. The
+ * chain already ramps difficulty every two links (1 + chainDepth/2); a pick is
+ * an act of aggression, so it adds one tier on top, capped at 3 like every
+ * other draw.
+ */
+const CHALLENGE_DIFFICULTY_BUMP = 1;
+
+/**
+ * DUEL ANTE — a FIXED stake, not a wager the picker sizes.
+ *
+ * A duel is symmetric: both racers put up the same amount and the winner takes
+ * the pair. Letting the picker choose the size would let a rich player shove a
+ * poor one all-in on a coin-flip they can afford to lose and their opponent
+ * cannot, which is a different (and worse) game. So the ante is fixed, and then
+ * capped by the POORER duelist's bankroll — `min(DUEL_ANTE, picker, target)` —
+ * so neither side can be made to stake money it does not have and no balance
+ * can go negative. All-in remains available, but only in CHALLENGE, where it is
+ * the picker's own money at their own risk.
+ */
+const DUEL_ANTE = 100;
+
 /** a question's clock shrinks as the chain deepens (room.ts askQuestion) */
 function questionTimeFor(chainDepth) {
   return Math.max(MIN_QUESTION_TIME_MS, BASE_QUESTION_TIME_MS - chainDepth * 1000);
@@ -207,9 +237,24 @@ const STATE_TTL_SECONDS = 24 * 60 * 60;
 const STATE_MAX_ATTEMPTS = 5;
 
 /**
- * Turn-engine actions still awaiting P2.2+. `start_game` used to be the tenth
- * entry here; it is handled for real now (it seeds the match state), so it is
- * dispatched before this set is consulted.
+ * Turn-engine actions still awaiting a later step. `start_game` used to be the
+ * tenth entry here; it is handled for real now (it seeds the match state), so
+ * it is dispatched before this set is consulted.
+ *
+ * ⚠ `submit_guess` / `submit_code` ARE THE OLD DUEL, AND NOTHING ROUTES TO IT.
+ *   room.ts fired a duel automatically whenever exactly two players were left
+ *   (DUEL_CHANCE = 0.5 on each spin) and rolled between a closest-GUESS duel
+ *   and a code-breaker duel; those are what these two messages fed.
+ *
+ *   P2.3 implements Matija's duel instead: a SPEED RACE on an ordinary
+ *   question, started BY A PICKER at a moment of their choosing, settled out
+ *   of the pot. It supersedes the automatic pair. The old code is not deleted
+ *   — the CODE_DUEL_TIME_MS constant, the `duel.kind` field and these two
+ *   message names all survive — but nothing calls it: there is no
+ *   DUEL_CHANCE here, enterSpin never branches into a duel, and the racers
+ *   answer through `submit_answer` like everyone else. Reviving it would mean
+ *   porting startDuel/startCodeDuel from room.ts and giving the picker a third
+ *   mode. AWAITING MATIJA'S CONFIRMATION that this is intended.
  */
 const TURN_ENGINE_ACTIONS = new Set([
   "submit_guess",
@@ -487,13 +532,19 @@ async function walletProfile(username) {
 //                              roundsPlayed }  — correct/wrong feed the quota
 //   lastSpinTarget S   kept for continuity; spinWeight supersedes it
 //   turn               { answering, question{...}, askedAt, answerTimeMs,
-//                        answer, answeredInMs } — `answer` is the submitted
-//                        answer, held hidden until reveal exactly as room.ts
-//                        does during the betting pause
+//                        answer, answeredInMs, mode NEW: open|challenge,
+//                        picker NEW } — `answer` is the submitted answer, held
+//                        hidden until reveal exactly as room.ts does during the
+//                        betting pause
 //   bets[]             NEW { username, side: correct|wrong, amount, quota }
-//                      — a list, not a Map, because Maps do not serialise
-//   duel               { kind: guess|code, players[2], endsAt, question,
-//                        guesses{}, code[], attempts{} }
+//                      — a list, not a Map, because Maps do not serialise. In a
+//                      CHALLENGE this holds exactly one entry: the picker's.
+//   duel               NEW (P2.3) the SPEED RACE:
+//                      { kind: "race", players[2], picker, target, ante,
+//                        question, askedAt, endsAt, answers{}, firstCorrect,
+//                        resolved, result }
+//                      room.ts's guess/code duels used this same field with
+//                      kind guess|code; nothing routes to those any more.
 //   currentSpin        { target, endsAt }        for reconnect resync
 //   currentPick        { picker, choices[], endsAt }
 //   deck               { fresh[], used[] } question ids — populated in P2.2
@@ -614,6 +665,10 @@ function publicGameState(s) {
     turn: s.turn
       ? {
           answering: s.turn.answering,
+          // "open" = the wheel landed on them and the table may bet;
+          // "challenge" = a picker sent them this question and owns the book
+          mode: s.turn.mode ?? "open",
+          picker: s.turn.picker ?? null,
           question: s.turn.question
             ? {
                 text: s.turn.question.text,
@@ -638,8 +693,28 @@ function publicGameState(s) {
     quotas:
       s.phase === "question" || s.phase === "betting" ? quotasFor(s) : null,
     betResults: s.phase === "reveal" ? s.betResults ?? [] : null,
+    // THE DUEL, with the same secrecy rules as a question: both racers need the
+    // text and the options, nobody may see `question.answer`, and nobody may
+    // see what the OTHER racer submitted until the duel is resolved — only THAT
+    // they have submitted, which is the information the race is actually about.
     duel: s.duel
-      ? { kind: s.duel.kind, players: s.duel.players, endsAt: s.duel.endsAt }
+      ? {
+          kind: s.duel.kind ?? "race",
+          players: s.duel.players ?? [],
+          picker: s.duel.picker ?? null,
+          target: s.duel.target ?? null,
+          ante: Number(s.duel.ante ?? 0),
+          endsAt: s.duel.endsAt,
+          question: s.duel.question
+            ? {
+                text: s.duel.question.text,
+                options: s.duel.question.options,
+                difficulty: s.duel.question.difficulty,
+              }
+            : null,
+          answered: Object.keys(s.duel.answers ?? {}),
+          result: s.duel.resolved ? s.duel.result ?? null : null,
+        }
       : null,
     currentSpin: s.currentSpin,
     currentPick: s.currentPick,
@@ -903,10 +978,24 @@ function weightedPick(alive) {
 // ends up holding it. That is the poker model Matija asked for, and it needs
 // no house edge to terminate.
 
-/** alive, not the one answering, and holding at least the minimum stake */
+/**
+ * Alive, not the one answering, and holding at least the minimum stake.
+ *
+ * (a) A CHALLENGE HAS EXACTLY ONE BETTOR: THE PICKER. A challenge is a private
+ * wager between the picker and the pot — the picker chose the victim, the price
+ * is the victim's own accuracy, and the stake was committed blind at pick time
+ * before the question was drawn. Opening that book to the table would let
+ * everyone else bet on a question the picker aimed and after the picker's own
+ * money was already down, which is a different game from the one Matija
+ * described. So the table SPECTATES a challenge: no open betting, and therefore
+ * no betting pause after the answer — it resolves straight to reveal.
+ * Table-wide betting is alive and unchanged on the WHEEL's questions, which is
+ * where P2.2 put it.
+ */
 function bettorsFor(state) {
   const t = state.turn;
   if (!t) return [];
+  if (t.mode === "challenge") return [];
   return livingPlayers(state).filter(
     (p) => p.username !== t.answering && p.money >= MIN_BET
   );
@@ -942,12 +1031,8 @@ function accuracyOf(player) {
  * settlement — by then the answerer's stats already include the very outcome
  * being paid out, which would price the bet using its own result.
  */
-function quotasFor(state) {
-  const t = state.turn;
-  const answerer = t
-    ? (state.players ?? []).find((p) => p.username === t.answering)
-    : null;
-  const p = answerer ? accuracyOf(answerer) : 0.5;
+function quotasForPlayer(player) {
+  const p = player ? accuracyOf(player) : 0.5;
   const price = (q) =>
     Math.round(Math.min(QUOTA_MAX, Math.max(QUOTA_MIN, 1 / Math.max(q, 0.01))) * 100) / 100;
   return {
@@ -955,6 +1040,14 @@ function quotasFor(state) {
     wrong: price(1 - p),
     accuracy: Math.round(p * 1000) / 1000,
   };
+}
+
+function quotasFor(state) {
+  const t = state.turn;
+  const answerer = t
+    ? (state.players ?? []).find((p) => p.username === t.answering)
+    : null;
+  return quotasForPlayer(answerer);
 }
 
 /**
@@ -1019,12 +1112,39 @@ function enterBetting(state) {
   return state;
 }
 
+/**
+ * (d) WHERE THE POT'S REMAINDER GOES.
+ *
+ * During the match: nowhere. Losers' stakes, scaled-down payouts, rounding
+ * dust, both antes of a duel nobody won — all of it simply STAYS IN THE POT and
+ * funds later rounds. Nothing is refunded and nothing is destroyed, which is
+ * what keeps `sum(money) + pot` provably constant round to round.
+ *
+ * At GAME OVER the remainder is paid to the winner and the pot is zeroed. That
+ * is a transfer, not an invention — the total is unchanged — and it makes the
+ * final scoreboard the honest one: everything anyone lost during the match ends
+ * up in the last player's hands rather than sitting in a number nobody owns.
+ * `potAwarded` reports how much of the final balance came from the pot.
+ */
 function enterGameOver(state) {
   const ranked = [...(state.players ?? [])]
     .filter((p) => !p.isSpectator)
     .sort((a, b) => (a.alive !== b.alive ? (a.alive ? -1 : 1) : b.money - a.money));
   state.winner = ranked[0]?.username ?? null;
+
+  const remainder = Math.max(0, Math.floor(Number(state.pot ?? 0)));
+  state.potAwarded = 0;
+  if (state.winner && remainder > 0) {
+    const w = (state.players ?? []).find((p) => p.username === state.winner);
+    if (w) {
+      w.money = Number(w.money ?? 0) + remainder;
+      state.pot = Number(state.pot ?? 0) - remainder;
+      state.potAwarded = remainder;
+    }
+  }
+
   state.turn = null;
+  state.duel = null;
   state.currentSpin = null;
   state.currentPick = null;
   setPhase(state, "gameover", 0);
@@ -1042,6 +1162,7 @@ function enterSpin(state) {
   applySpinWeights(state, target.username);
   state.lastSpinTarget = target.username;
   state.turn = null;
+  state.duel = null; // a new chain starts clean — no stale duel on the state
   state.currentPick = null;
   setPhase(state, "spin", SPIN_TIME_MS);
   state.currentSpin = {
@@ -1052,21 +1173,40 @@ function enterSpin(state) {
   return state;
 }
 
-function enterQuestion(state, username, pool) {
-  const player = (state.players ?? []).find((p) => p.username === username);
-  if (!player || !player.alive) return enterSpin(state);
-
+/** credit the round to everyone still standing, exactly as room.ts creditRound */
+function creditRound(state) {
   state.round = Number(state.round ?? 0) + 1;
-  // room.ts credits the round to everyone still standing (creditRound)
   for (const p of livingPlayers(state)) {
     p.stats = p.stats ?? { correct: 0, wrong: 0, betsWon: 0, maxBetWin: 0, roundsPlayed: 0 };
     p.stats.roundsPlayed = Number(p.stats.roundsPlayed ?? 0) + 1;
   }
+}
 
-  const difficulty = Math.min(3, Math.max(1, 1 + Math.floor(Number(state.chainDepth ?? 0) / 2)));
+/** the chain's baseline tier, plus whatever a pick adds on top, capped at 3 */
+function difficultyFor(state, bump = 0) {
+  const base = 1 + Math.floor(Number(state.chainDepth ?? 0) / 2) + Number(bump ?? 0);
+  return Math.min(3, Math.max(1, base));
+}
+
+/**
+ * `opts.mode` is "open" for a question the WHEEL handed out (the table bets)
+ * and "challenge" for one a PICKER aimed (only the picker has a stake). The
+ * caller places the picker's bet AFTER this returns, because the quota is
+ * priced off the target's accuracy and the target is not `turn.answering`
+ * until this function has run.
+ */
+function enterQuestion(state, username, pool, opts = {}) {
+  const player = (state.players ?? []).find((p) => p.username === username);
+  if (!player || !player.alive) return enterSpin(state);
+
+  creditRound(state);
+
+  const difficulty = difficultyFor(state, opts.difficultyBump ?? 0);
   const answerTimeMs = questionTimeFor(Number(state.chainDepth ?? 0));
   state.turn = {
     answering: username,
+    mode: opts.mode === "challenge" ? "challenge" : "open",
+    picker: opts.picker ?? null,
     question: drawQuestion(state, difficulty, pool),
     askedAt: nowMs(),
     answerTimeMs,
@@ -1079,9 +1219,232 @@ function enterQuestion(state, username, pool) {
   // a fresh betting book each turn; the POT deliberately carries over
   state.bets = [];
   state.betResults = [];
+  state.duel = null;
   state.currentSpin = null;
   state.currentPick = null;
   setPhase(state, "question", answerTimeMs);
+  return state;
+}
+
+// ─── P2.3: the pick, and the two things a pick can be ──────────────────────
+
+/**
+ * What a duel between these two would cost each of them: the fixed ante, capped
+ * by the poorer bankroll so both stake the SAME amount and neither can be
+ * pushed below zero. Advertised per target on `pick_start` so the picker sees
+ * the price before choosing the mode.
+ */
+function duelAnteBetween(picker, target) {
+  const cap = Math.min(Number(picker?.money ?? 0), Number(target?.money ?? 0));
+  return Math.max(0, Math.floor(Math.min(DUEL_ANTE, cap)));
+}
+
+/**
+ * Hand the pick to `picker`. The choices carry the information the choice needs
+ * — each target's live quotas (the price of a CHALLENGE on them) and the ante a
+ * DUEL with them would cost — so the client renders real numbers rather than
+ * guessing at them.
+ */
+function enterPicking(state, picker) {
+  const me = (state.players ?? []).find((p) => p.username === picker);
+  const choices = livingPlayers(state).filter((p) => p.username !== picker);
+  if (!me || !me.alive || !choices.length) return enterSpin(state);
+
+  setPhase(state, "picking", PICK_TIME_MS);
+  state.currentPick = {
+    picker,
+    choices: choices.map((p) => p.username),
+    modes: ["challenge", "duel"],
+    targets: choices.map((p) => ({
+      username: p.username,
+      quotas: quotasForPlayer(p),
+      duelAnte: duelAnteBetween(me, p),
+    })),
+    endsAt: state.phaseEndsAt,
+  };
+  return state;
+}
+
+/**
+ * THE DUEL — picker and target race the SAME harder question.
+ *
+ * Both antes leave their owners and enter the pot HERE, at the start, exactly
+ * as a bet's stake does: the money is visibly committed before anyone can see
+ * the question, and settlement is a transfer back OUT of the pot. Nothing is
+ * created at resolution, which is what keeps the invariant provable.
+ */
+function enterDuel(state, pickerName, targetName, pool) {
+  const picker = (state.players ?? []).find((p) => p.username === pickerName);
+  const target = (state.players ?? []).find((p) => p.username === targetName);
+  if (!picker?.alive || !target?.alive) return enterSpin(state);
+
+  creditRound(state);
+
+  const ante = duelAnteBetween(picker, target);
+  picker.money -= ante;
+  target.money -= ante;
+  state.pot = Number(state.pot ?? 0) + ante * 2;
+
+  state.turn = null;
+  state.bets = [];
+  state.betResults = [];
+  state.currentSpin = null;
+  state.currentPick = null;
+  setPhase(state, "duel", DUEL_TIME_MS);
+  state.duel = {
+    // room.ts's duels were kind "guess" | "code"; this is the third and the
+    // only one anything routes to now
+    kind: "race",
+    players: [pickerName, targetName],
+    picker: pickerName,
+    target: targetName,
+    ante,
+    question: drawQuestion(state, difficultyFor(state, CHALLENGE_DIFFICULTY_BUMP), pool),
+    askedAt: nowMs(),
+    endsAt: state.phaseEndsAt,
+    answers: {},
+    firstCorrect: null,
+    resolved: false,
+    result: null,
+  };
+  return state;
+}
+
+/** anyone who has hit zero is out; shared by both resolution paths */
+function eliminateBrokePlayers(state) {
+  state.eliminated = [];
+  for (const p of state.players ?? []) {
+    if (p.alive && p.money <= 0) {
+      p.money = 0;
+      p.alive = false;
+      state.eliminated.push(p.username);
+    }
+  }
+  return state.eliminated;
+}
+
+/**
+ * Record one racer's submission. Returns the state to write, or null when the
+ * submission is not one this duel accepts (a spectator, a second attempt, or
+ * one that arrived after the buzzer).
+ *
+ * SPEED IS THE WHOLE GAME, so the clock read here is the SERVER's — elapsed
+ * since `askedAt`, measured when the mutation runs. A client-supplied timestamp
+ * would be a self-reported race time.
+ *
+ * The window closes on the first CORRECT answer and not before: a racer who
+ * buzzes in early and gets it WRONG has spent their one attempt, and the other
+ * can still take the pot by answering correctly any time before the deadline.
+ */
+function applyDuelAnswer(state, username, answer) {
+  const d = state.duel;
+  if (state.phase !== "duel" || !d || d.resolved) return null;
+  if (!Array.isArray(d.players) || !d.players.includes(username)) return null;
+  d.answers = d.answers ?? {};
+  if (d.answers[username]) return null;
+  if (nowMs() > Number(state.phaseEndsAt ?? 0)) return null;
+
+  const correct = answer === d.question?.answer;
+  d.answers[username] = {
+    answer,
+    atMs: Math.max(0, nowMs() - Number(d.askedAt ?? nowMs())),
+    correct,
+  };
+  if (correct && !d.firstCorrect) d.firstCorrect = username;
+
+  const everyoneIn = Object.keys(d.answers).length >= d.players.length;
+  return correct || everyoneIn ? resolveDuel(state) : state;
+}
+
+/**
+ * Settle the duel and go to reveal. Idempotent via `resolved`, so a deadline
+ * that fires the instant after the second answer landed cannot pay twice.
+ *
+ *   winner  += 2 × ante   (their own back, plus the loser's)   ← out of the pot
+ *   loser    −  ante      (already paid in at the start)
+ *
+ * (c) NO WINNER — both wrong, or one wrong and one silent, or both silent: the
+ * antes STAY IN THE POT. A duel neither player could win costs them both, which
+ * is symmetric, conserved, and makes starting one a real decision rather than a
+ * free option. A PHOTO FINISH — both correct on the same server millisecond,
+ * which needs two submissions to land inside the same tick — goes to the
+ * TARGET: the picker chose the moment and the opponent, so the defender takes
+ * the tie.
+ *
+ * The standard WRONG_ANSWER_COST is deliberately NOT charged on top of a lost
+ * ante. The ante IS the duel's stake; charging both would price a duel loss at
+ * ante + 100 for the loser and make picking a duel strictly worse than a
+ * challenge. Stats still record correct/wrong for both racers, so a duel moves
+ * the accuracy that prices everyone's future quotas.
+ */
+function resolveDuel(state) {
+  const d = state.duel;
+  if (!d || d.resolved) return state;
+
+  const submissions = (d.players ?? []).map((username) => {
+    const a = d.answers?.[username] ?? null;
+    return {
+      username,
+      answer: a?.answer ?? null,
+      atMs: a ? Number(a.atMs) : null,
+      correct: Boolean(a?.correct),
+      answered: Boolean(a),
+    };
+  });
+
+  const finished = submissions
+    .filter((s) => s.correct)
+    .sort((x, y) => {
+      if (x.atMs !== y.atMs) return x.atMs - y.atMs;
+      return x.username === d.target ? -1 : 1; // photo finish → the defender
+    });
+
+  const winner = finished[0]?.username ?? null;
+  const loser = winner ? (d.players ?? []).find((u) => u !== winner) ?? null : null;
+  const ante = Math.max(0, Number(d.ante ?? 0));
+
+  let payout = 0;
+  if (winner && ante > 0) {
+    // the pot is a hard ceiling here exactly as it is in settleBets — the two
+    // antes went in moments ago so this never actually binds, but it is what
+    // makes "the pot cannot go negative" true by construction rather than by
+    // argument
+    payout = Math.min(ante * 2, Math.max(0, Number(state.pot ?? 0)));
+    const w = (state.players ?? []).find((p) => p.username === winner);
+    if (w) {
+      w.money = Number(w.money ?? 0) + payout;
+      state.pot = Number(state.pot ?? 0) - payout;
+    }
+  }
+
+  // a duel answer counts toward accuracy like any other; a no-show counts as
+  // wrong, the same way a timed-out turn does
+  for (const s of submissions) {
+    const p = (state.players ?? []).find((x) => x.username === s.username);
+    if (!p) continue;
+    p.stats = p.stats ?? { correct: 0, wrong: 0, betsWon: 0, maxBetWin: 0, roundsPlayed: 0 };
+    if (s.correct) p.stats.correct = Number(p.stats.correct ?? 0) + 1;
+    else p.stats.wrong = Number(p.stats.wrong ?? 0) + 1;
+  }
+
+  d.resolved = true;
+  d.result = {
+    winner,
+    loser,
+    ante,
+    payout,
+    // net movement per racer, so the client never has to recompute it
+    deltas: (d.players ?? []).map((u) => ({
+      username: u,
+      net: u === winner ? payout - ante : -ante,
+    })),
+    correctAnswer: d.question?.answer ?? null,
+    submissions,
+    timedOut: submissions.filter((s) => !s.answered).map((s) => s.username),
+  };
+
+  eliminateBrokePlayers(state);
+  setPhase(state, "reveal", REVEAL_MS);
   return state;
 }
 
@@ -1117,36 +1480,44 @@ function enterReveal(state) {
   settleBets(state);
 
   // elimination wiring — P2.4 finalises standings and persistence
-  state.eliminated = [];
-  for (const p of state.players ?? []) {
-    if (p.alive && p.money <= 0) {
-      p.money = 0;
-      p.alive = false;
-      state.eliminated.push(p.username);
-    }
-  }
+  eliminateBrokePlayers(state);
 
   setPhase(state, "reveal", REVEAL_MS);
   return state;
 }
 
-/** correct → the answerer picks the next victim; wrong → back to the wheel */
+/**
+ * THE CHAIN, one rule for all three ways a reveal can be reached:
+ *
+ *   whoever just answered CORRECTLY picks next
+ *      · the wheel's victim answered right      → they pick
+ *      · a CHALLENGE target answered right      → the TARGET picks, taking the
+ *                                                 chain off the picker who
+ *                                                 aimed at them
+ *      · a DUEL had a winner                    → the WINNER picks
+ *   nobody did                                  → back to the wheel, chain
+ *                                                 resets to 0 (enterSpin)
+ */
 function afterReveal(state, pool) {
   if (livingPlayers(state).length <= 1) return enterGameOver(state);
+
+  const d = state.duel;
+  if (d?.resolved) {
+    const winner = d.result?.winner ?? null;
+    const w = winner ? (state.players ?? []).find((p) => p.username === winner) : null;
+    state.duel = null;
+    return w?.alive ? enterPicking(state, winner) : enterSpin(state);
+  }
 
   const t = state.turn;
   const answerer = t ? (state.players ?? []).find((p) => p.username === t.answering) : null;
   if (t?.correct && answerer?.alive) {
-    const choices = livingPlayers(state)
-      .filter((p) => p.username !== t.answering)
-      .map((p) => p.username);
-    if (choices.length === 1) {
-      state.chainDepth = Number(state.chainDepth ?? 0) + 1;
-      return enterQuestion(state, choices[0], pool);
-    }
-    setPhase(state, "picking", PICK_TIME_MS);
-    state.currentPick = { picker: t.answering, choices, endsAt: state.phaseEndsAt };
-    return state;
+    // NOTE: even with a single possible target the picker still gets the
+    // picking phase, because the choice that matters heads-up is not WHO but
+    // CHALLENGE-or-DUEL. P2.1 skipped straight to a question here, which would
+    // now quietly deny the mode choice at exactly the two-player endgame where
+    // a duel is the most interesting thing on the menu.
+    return enterPicking(state, t.answering);
   }
   return enterSpin(state);
 }
@@ -1164,14 +1535,27 @@ function advanceOnDeadline(state, pool) {
       return enterReveal(state);
     case "betting":
       return enterReveal(state);
+    case "duel":
+      // the window closed with nobody having answered correctly (or with one
+      // racer never answering at all) — resolveDuel handles both
+      return resolveDuel(state);
     case "reveal":
       return afterReveal(state, pool);
     case "picking": {
       const choices = state.currentPick?.choices ?? [];
       if (!choices.length) return enterSpin(state);
+      // a picker who says nothing still picks: a random target, in CHALLENGE
+      // mode, with NO wager. Auto-staking someone's money on a bet they never
+      // made would be the one place the engine could lose a player money
+      // without them touching anything, and a duel cannot be defaulted into
+      // either — it would ante the silent picker AND their target.
       const target = choices[Math.floor(Math.random() * choices.length)];
       state.chainDepth = Number(state.chainDepth ?? 0) + 1;
-      return enterQuestion(state, target, pool);
+      return enterQuestion(state, target, pool, {
+        mode: "challenge",
+        picker: state.currentPick?.picker ?? null,
+        difficultyBump: CHALLENGE_DIFFICULTY_BUMP,
+      });
     }
     default:
       return null;
@@ -1247,9 +1631,37 @@ function phaseMessage(state) {
         round: state.round,
         chainDepth: state.chainDepth,
         answering: state.turn?.answering,
+        // a challenge carries who aimed it, and what they staked — the SIDE
+        // stays hidden until reveal, like every other bet
+        mode: state.turn?.mode ?? "open",
+        picker: state.turn?.picker ?? null,
+        challengeBet:
+          state.turn?.mode === "challenge"
+            ? (state.bets ?? [])
+                .filter((b) => b.username === state.turn.picker)
+                .map((b) => ({ username: b.username, amount: b.amount, quota: b.quota }))[0] ?? null
+            : null,
         questionText: state.turn?.question?.text,
         options: state.turn?.question?.options,
         difficulty: state.turn?.question?.difficulty,
+        answerTimeMs: Math.max(0, Number(state.phaseEndsAt) - nowMs()),
+      };
+    case "duel":
+      return {
+        type: "duel_start",
+        kind: "race",
+        round: state.round,
+        chainDepth: state.chainDepth,
+        players: state.duel?.players ?? [],
+        picker: state.duel?.picker ?? null,
+        target: state.duel?.target ?? null,
+        ante: Number(state.duel?.ante ?? 0),
+        pot: Number(state.pot ?? 0),
+        questionText: state.duel?.question?.text,
+        options: state.duel?.question?.options,
+        difficulty: state.duel?.question?.difficulty,
+        // who has already buzzed in — NOT what they said
+        answered: Object.keys(state.duel?.answers ?? {}),
         answerTimeMs: Math.max(0, Number(state.phaseEndsAt) - nowMs()),
       };
     case "betting":
@@ -1261,6 +1673,29 @@ function phaseMessage(state) {
         quotas: quotasFor(state),
       };
     case "reveal":
+      // a duel reveals as a duel: two racers, two times, one winner
+      if (state.duel?.resolved) {
+        const r = state.duel.result ?? {};
+        return {
+          type: "duel_result",
+          kind: "race",
+          round: state.round,
+          chainDepth: state.chainDepth,
+          players: state.duel.players ?? [],
+          picker: state.duel.picker ?? null,
+          target: state.duel.target ?? null,
+          ante: Number(r.ante ?? 0),
+          winner: r.winner ?? null,
+          loser: r.loser ?? null,
+          payout: Number(r.payout ?? 0),
+          deltas: r.deltas ?? [],
+          submissions: r.submissions ?? [],
+          timedOut: r.timedOut ?? [],
+          correctAnswer: r.correctAnswer ?? null,
+          pot: Number(state.pot ?? 0),
+          eliminated: state.eliminated ?? [],
+        };
+      }
       return {
         type: "round_result",
         round: state.round,
@@ -1269,6 +1704,8 @@ function phaseMessage(state) {
         betScale: Number(state.turn?.betScale ?? 1),
         chainDepth: state.chainDepth,
         answering: state.turn?.answering,
+        mode: state.turn?.mode ?? "open",
+        picker: state.turn?.picker ?? null,
         answer: state.turn?.answer ?? null,
         timedOut: Boolean(state.turn?.timedOut),
         correct: Boolean(state.turn?.correct),
@@ -1281,10 +1718,23 @@ function phaseMessage(state) {
         type: "pick_start",
         picker: state.currentPick?.picker,
         choices: state.currentPick?.choices ?? [],
+        // P2.3 — the pick is now target AND mode, so the prices for both ride
+        // along: `quotas` is what a CHALLENGE on that target pays, `duelAnte`
+        // is what a DUEL with them costs each side
+        modes: state.currentPick?.modes ?? ["challenge", "duel"],
+        targets: state.currentPick?.targets ?? [],
+        minBet: MIN_BET,
+        pot: Number(state.pot ?? 0),
         pickTimeMs: Math.max(0, Number(state.phaseEndsAt) - nowMs()),
       };
     case "gameover":
-      return { type: "game_over", winner: state.winner ?? null, rounds: state.round };
+      return {
+        type: "game_over",
+        winner: state.winner ?? null,
+        rounds: state.round,
+        // (d) whatever was still in the pot went to the winner
+        potAwarded: Number(state.potAwarded ?? 0),
+      };
     default:
       return null;
   }
@@ -1962,8 +2412,10 @@ async function onStartGame(event, connectionId, row) {
  * player-driven transition: the sleeping timer is stopped and re-armed on the
  * new reveal deadline.
  *
- * P2.2 inserts the betting pause between here and reveal; for now a submitted
- * answer resolves straight through.
+ * P2.3 routes DUEL submissions through this same message. One submit path for
+ * the client, two rule sets on the server: in `duel` the sender must be one of
+ * the two racers, and their answer may leave the phase running (a wrong buzz
+ * does not end the race) instead of always ending it.
  */
 async function onSubmitAnswer(event, connectionId, row, msg) {
   if (!row?.username || !row?.lobbyId) {
@@ -1974,24 +2426,38 @@ async function onSubmitAnswer(event, connectionId, row, msg) {
     return;
   }
   const answer = String(msg.answer ?? "");
-  const pool = await loadQuestionPool();
   const before = await readGameState(row.lobbyId);
+  let phaseMoved = false;
 
   const res = await mutateGameState(row.lobbyId, (s) => {
-    if (s.phase !== "question" || !s.turn) return null;
-    if (s.turn.answering !== row.username) return null;
-    if (s.turn.answer !== null && s.turn.answer !== undefined) return null;
-    if (nowMs() > Number(s.phaseEndsAt ?? 0)) return null; // too late — the timer owns it
-    s.turn.answer = answer;
-    s.turn.answeredInMs = nowMs() - Number(s.turn.askedAt ?? nowMs());
-    // the answer stays hidden while the last bets come in — room.ts's "last
-    // call" pause. If nobody is left to bet, resolve straight through.
-    return pendingBettors(s).length > 0 ? enterBetting(s) : enterReveal(s);
+    const seqBefore = Number(s.phaseSeq ?? 0);
+    let next;
+
+    if (s.phase === "duel") {
+      next = applyDuelAnswer(s, row.username, answer);
+    } else {
+      if (s.phase !== "question" || !s.turn) return null;
+      if (s.turn.answering !== row.username) return null;
+      if (s.turn.answer !== null && s.turn.answer !== undefined) return null;
+      if (nowMs() > Number(s.phaseEndsAt ?? 0)) return null; // too late — the timer owns it
+      s.turn.answer = answer;
+      s.turn.answeredInMs = nowMs() - Number(s.turn.askedAt ?? nowMs());
+      // the answer stays hidden while the last bets come in — room.ts's "last
+      // call" pause. If nobody is left to bet, resolve straight through. A
+      // CHALLENGE has no open book, so it always takes the second branch.
+      next = pendingBettors(s).length > 0 ? enterBetting(s) : enterReveal(s);
+    }
+
+    if (!next) return null;
+    phaseMoved = Number(next.phaseSeq ?? 0) !== seqBefore;
+    return next;
   });
 
   if (!res.ok) return; // not their turn, already answered, or past the buzzer
   await broadcastPhase(event, row.lobbyId, res.state);
-  await rearmPhaseTimer(res.state, before?.executionArn);
+  // a duel that is still running kept its deadline, and re-arming a timer that
+  // is already asleep on the right instant would only churn executions
+  if (phaseMoved) await rearmPhaseTimer(res.state, before?.executionArn);
 }
 
 /**
@@ -2022,6 +2488,10 @@ async function onPlaceBet(event, connectionId, row, msg) {
   const res = await mutateGameState(row.lobbyId, (s) => {
     if (s.phase !== "question" && s.phase !== "betting") return null;
     if (!s.turn) return null;
+    // (a) a CHALLENGE's only bet is the picker's, and it was committed at pick
+    // time — the book is closed to everyone, picker included. A DUEL takes no
+    // side bets at all: its only stakes are the two antes.
+    if (s.turn.mode === "challenge") return null;
     if (nowMs() > Number(s.phaseEndsAt ?? 0)) return null; // past the deadline
     if (!["correct", "wrong", "neutral"].includes(side)) return null;
     if (s.turn.answering === row.username) return null;    // can't bet on yourself
@@ -2065,8 +2535,30 @@ async function onPlaceBet(event, connectionId, row, msg) {
 }
 
 /**
- * pick_player — the correct answerer chooses who faces the next question.
- * P2.3 adds the CHALLENGE / DUEL mode choice on top of this target choice.
+ * pick_player — the correct answerer chooses WHO faces the next question AND
+ * HOW. This is P2.3's whole surface:
+ *
+ *   { type: "pick_player",
+ *     target: "<username>",
+ *     mode:   "challenge" | "duel",     // default "challenge"
+ *     side:   "correct" | "wrong",      // CHALLENGE only, optional
+ *     amount: <number> | "all" }        // CHALLENGE only, with `side`
+ *
+ * CHALLENGE — the target answers a harder question alone. The picker may back
+ * that outcome with their own money, priced off the TARGET's accuracy. The
+ * stake is committed HERE, blind: the question is drawn in the same mutation
+ * and nobody, picker included, has seen it. Omitting `side` picks a target
+ * without wagering, which is exactly P2.1's behaviour plus a difficulty bump.
+ *
+ * DUEL — picker and target race the same harder question, both anteing.
+ * `side`/`amount` are meaningless and ignored: a duel's price is the fixed,
+ * symmetric ante, not something the picker sizes.
+ *
+ * The whole pick — mode, target, question draw, stake, phase change — is ONE
+ * mutateGameState, so it is one version bump. There is no instant where the
+ * money has left the picker but the question does not exist, and two clicks
+ * from a double-tapped button cannot both land: the second finds the phase no
+ * longer `picking` and aborts without writing.
  */
 async function onPickPlayer(event, connectionId, row, msg) {
   if (!row?.username || !row?.lobbyId) {
@@ -2077,18 +2569,101 @@ async function onPickPlayer(event, connectionId, row, msg) {
     return;
   }
   const target = String(msg.target ?? "");
+  // an absent mode is a CHALLENGE with no wager — the P2.1 pick, unchanged for
+  // any client that has not learned about modes yet
+  const mode = String(msg.mode ?? "challenge").toLowerCase();
+  const side = msg.side === undefined || msg.side === null ? null : String(msg.side);
   const pool = await loadQuestionPool();
   const before = await readGameState(row.lobbyId);
 
+  // set fresh on every attempt — mutateGameState replays the closure on a
+  // version conflict, and a stale flag from the losing attempt must not survive
+  let denied = null;
+  let accepted = null;
+
   const res = await mutateGameState(row.lobbyId, (s) => {
-    if (s.phase !== "picking" || !s.currentPick) return null;
-    if (s.currentPick.picker !== row.username) return null;
-    if (!(s.currentPick.choices ?? []).includes(target)) return null;
+    denied = null;
+    accepted = null;
+
+    if (s.phase !== "picking" || !s.currentPick) { denied = "not_picking"; return null; }
+    if (s.currentPick.picker !== row.username) { denied = "not_picker"; return null; }
+    if (!(s.currentPick.choices ?? []).includes(target)) { denied = "bad_target"; return null; }
+    if (mode !== "challenge" && mode !== "duel") { denied = "bad_mode"; return null; }
+
+    const picker = (s.players ?? []).find((p) => p.username === row.username);
+    const victim = (s.players ?? []).find((p) => p.username === target);
+    if (!picker?.alive || !victim?.alive) { denied = "bad_target"; return null; }
+
+    // the chain deepens on a pick either way: harder questions, shorter clock
     s.chainDepth = Number(s.chainDepth ?? 0) + 1;
-    return enterQuestion(s, target, pool);
+
+    if (mode === "duel") {
+      const next = enterDuel(s, row.username, target, pool);
+      accepted = {
+        mode: "duel",
+        target,
+        ante: Number(next.duel?.ante ?? 0),
+        bet: null,
+        betSkipped:
+          next.duel && Number(next.duel.ante) === 0 ? "no_funds_either_side" : null,
+      };
+      return next;
+    }
+
+    enterQuestion(s, target, pool, {
+      mode: "challenge",
+      picker: row.username,
+      difficultyBump: CHALLENGE_DIFFICULTY_BUMP,
+    });
+    // enterQuestion falls back to the wheel if the target turned out unfit to
+    // answer; there is nothing to bet on in that case
+    if (s.phase !== "question") {
+      accepted = { mode: "challenge", target, bet: null, betSkipped: "target_unavailable" };
+      return s;
+    }
+
+    accepted = { mode: "challenge", target, bet: null, betSkipped: null };
+    if (side === "correct" || side === "wrong") {
+      if (picker.money < MIN_BET) {
+        // the pick still stands, the wager does not
+        accepted.betSkipped = "insufficient_funds";
+      } else {
+        const allIn = msg.amount === "all" || msg.allIn === true;
+        const raw = allIn ? picker.money : Math.floor(Number(msg.amount) || 0);
+        const amount = Math.min(picker.money, Math.max(MIN_BET, raw));
+        // priced off the TARGET, who is `turn.answering` now that
+        // enterQuestion has run, and LOCKED — settlement never re-prices
+        const quota = quotasFor(s)[side];
+        picker.money -= amount;                      // out of the pocket…
+        s.pot = Number(s.pot ?? 0) + amount;         // …and into the pot
+        s.bets = s.bets ?? [];
+        s.bets.push({ username: row.username, side, amount, quota });
+        accepted.bet = { amount, quota };
+      }
+    } else if (side !== null) {
+      accepted.betSkipped = "bad_side";
+    }
+    return s;
   });
 
-  if (!res.ok) return;
+  if (!res.ok) {
+    await postTo(event, connectionId, {
+      type: "error",
+      reason: denied ?? res.reason,
+      action: "pick_player",
+      message:
+        denied === "not_picker" ? "It is not your pick."
+        : denied === "bad_target" ? "That player cannot be picked right now."
+        : denied === "bad_mode" ? 'Mode must be "challenge" or "duel".'
+        : denied === "not_picking" ? "The picking phase is over."
+        : "Could not register that pick, please try again.",
+    });
+    return;
+  }
+
+  // the picker gets a private receipt — what was staked, at what price, and
+  // whether any part of the request was dropped
+  await postTo(event, connectionId, { type: "pick_accepted", ...accepted });
   await broadcastPhase(event, row.lobbyId, res.state);
   await rearmPhaseTimer(res.state, before?.executionArn);
 }
