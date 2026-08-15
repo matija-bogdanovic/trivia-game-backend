@@ -15,6 +15,20 @@ import { publicGameState } from "./state.mjs";
 /** the phase-specific message that rides alongside game_state */
 function phaseMessage(state) {
   switch (state.phase) {
+    // "Runda N" — the beat that opens a wheel cycle. `roundEndsAt` is the
+    // absolute deadline and `introTimeMs` the time LEFT on it, so a client
+    // that reloads two seconds in is told 500ms and lands in step rather than
+    // restarting the animation. Same contract as every other phase message.
+    case "round_intro":
+      return {
+        type: "round_intro",
+        round: Number(state.round ?? 0),
+        roundEndsAt: Number(state.phaseEndsAt),
+        introTimeMs: Math.max(0, Number(state.phaseEndsAt) - nowMs()),
+        playersAlive: (state.players ?? []).filter(
+          (p) => p.alive && !p.isSpectator
+        ).length,
+      };
     case "spin":
       return {
         type: "spin",

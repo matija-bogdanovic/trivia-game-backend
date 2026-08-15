@@ -39,13 +39,16 @@ import { quotasFor } from "./pot.mjs";
 //   lobbyId        S   partition key, the same id used everywhere else
 //   version        N   optimistic lock — every write asserts the value it read
 //   matchId        S   fresh per start_game, not per lobby (room.ts matchId)
-//   phase          S   lobby|countdown|spin|question|betting|reveal|
-//                      picking|duel|gameover  (the 9 from types.ts GamePhase)
+//   phase          S   lobby|countdown|round_intro|spin|question|betting|
+//                      reveal|picking|duel|gameover  (the 9 from types.ts
+//                      GamePhase, plus `round_intro` — the "Runda N" beat)
 //   phaseEndsAt    N   NEW absolute epoch ms. room.ts used setTimeout, which a
 //                      Lambda cannot hold; this is what P2.1's scheduler fires
 //                      on, and it is why every phase now has a real deadline —
 //                      including `betting`, which room.ts never gave one.
-//   round          N   rounds elapsed
+//   round          N   WHEEL CYCLES elapsed, 1-based. Incremented in exactly
+//                      one place, enterRoundIntro; a challenge/duel chain runs
+//                      inside one round and does not bump it.
 //   chainDepth     N   drives difficulty (1 + floor(depth/2)) and the clock
 //   pot            N   NEW central pot. Stakes go in, winners are paid out of
 //                      it, scaled down if it cannot cover — money conserved.

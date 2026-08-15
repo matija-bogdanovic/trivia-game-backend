@@ -14,6 +14,7 @@ import {
   DUEL_TIME_MS,
   PICK_TIME_MS,
   REVEAL_MS,
+  ROUND_INTRO_MS,
   SPIN_TIME_MS,
   WRONG_ANSWER_COST,
   nowMs,
@@ -68,6 +69,47 @@ function enterGameOver(state) {
   return state;
 }
 
+/**
+ * ROUND INTRO — "Runda N", the beat that opens every wheel cycle.
+ *
+ * THIS IS THE ONE PLACE `round` IS INCREMENTED, and that is the whole point of
+ * the phase. A round is now defined as ONE WHEEL-SELECTION CYCLE: the wheel
+ * picks somebody, and everything that follows from that pick — the question,
+ * the bets, and however deep the challenge/duel chain runs off a correct
+ * answer — all belongs to that same round. Only coming back to the wheel
+ * starts a new one.
+ *
+ * That is a change of meaning: `round` used to tick once per QUESTION, so a
+ * five-link chain read as five rounds. The per-player `stats.roundsPlayed`
+ * counter is deliberately left alone — it still counts turns taken, which is
+ * what it has always meant and what the match history is built from.
+ *
+ * Every path back to the wheel comes through here rather than calling
+ * enterSpin directly, so the counter cannot drift from what the players are
+ * shown. The one guard: a match with a single player left is already over, and
+ * announcing "Runda 12" a moment before the game-over screen would be a lie —
+ * so that case goes straight to gameover and the round number stops where the
+ * last real round left it.
+ */
+function enterRoundIntro(state) {
+  if (livingPlayers(state).length <= 1) return enterGameOver(state);
+
+  state.round = Number(state.round ?? 0) + 1;
+  // the previous round's turn is finished and already revealed; clearing it
+  // means the intro screen renders against a clean state rather than the
+  // leftovers of the round being replaced. The chain belonged to the round
+  // that just ended, so it resets here rather than one phase later in
+  // enterSpin — otherwise `game_state` would advertise a live chain depth
+  // underneath a card announcing a fresh round.
+  state.chainDepth = 0;
+  state.turn = null;
+  state.duel = null;
+  state.currentSpin = null;
+  state.currentPick = null;
+  setPhase(state, "round_intro", ROUND_INTRO_MS);
+  return state;
+}
+
 /** the wheel: decide the FINAL target up front, then animate for 5s */
 function enterSpin(state) {
   const alive = livingPlayers(state);
@@ -89,9 +131,15 @@ function enterSpin(state) {
   return state;
 }
 
-/** credit the round to everyone still standing, exactly as room.ts creditRound */
-function creditRound(state) {
-  state.round = Number(state.round ?? 0) + 1;
+/**
+ * Credit a TURN to everyone still standing (room.ts's creditRound).
+ *
+ * It no longer touches `state.round` — that moved to enterRoundIntro, because
+ * a round is now a wheel cycle rather than a question. `stats.roundsPlayed`
+ * still counts one per turn, unchanged, which is what the stat has always
+ * meant: how many questions this player was present for.
+ */
+function creditTurn(state) {
   for (const p of livingPlayers(state)) {
     p.stats = p.stats ?? { correct: 0, wrong: 0, betsWon: 0, maxBetWin: 0, roundsPlayed: 0 };
     p.stats.roundsPlayed = Number(p.stats.roundsPlayed ?? 0) + 1;
@@ -113,9 +161,9 @@ function difficultyFor(state, bump = 0) {
  */
 function enterQuestion(state, username, pool, opts = {}) {
   const player = (state.players ?? []).find((p) => p.username === username);
-  if (!player || !player.alive) return enterSpin(state);
+  if (!player || !player.alive) return enterRoundIntro(state);
 
-  creditRound(state);
+  creditTurn(state);
 
   const difficulty = difficultyFor(state, opts.difficultyBump ?? 0);
   const answerTimeMs = questionTimeFor(Number(state.chainDepth ?? 0));
@@ -164,7 +212,7 @@ function duelAnteBetween(picker, target) {
 function enterPicking(state, picker) {
   const me = (state.players ?? []).find((p) => p.username === picker);
   const choices = livingPlayers(state).filter((p) => p.username !== picker);
-  if (!me || !me.alive || !choices.length) return enterSpin(state);
+  if (!me || !me.alive || !choices.length) return enterRoundIntro(state);
 
   setPhase(state, "picking", PICK_TIME_MS);
   state.currentPick = {
@@ -192,9 +240,9 @@ function enterPicking(state, picker) {
 function enterDuel(state, pickerName, targetName, pool) {
   const picker = (state.players ?? []).find((p) => p.username === pickerName);
   const target = (state.players ?? []).find((p) => p.username === targetName);
-  if (!picker?.alive || !target?.alive) return enterSpin(state);
+  if (!picker?.alive || !target?.alive) return enterRoundIntro(state);
 
-  creditRound(state);
+  creditTurn(state);
 
   const ante = duelAnteBetween(picker, target);
   picker.money -= ante;
@@ -375,7 +423,7 @@ function resolveDuel(state) {
 /** resolve the turn: correctness, stats, money. P2.2 settles the pot here. */
 function enterReveal(state) {
   const t = state.turn;
-  if (!t) return enterSpin(state);
+  if (!t) return enterRoundIntro(state);
 
   const timedOut = t.answer === null || t.answer === undefined;
   const correct = !timedOut && t.answer === t.question?.answer;
@@ -430,7 +478,7 @@ function afterReveal(state, pool) {
     const winner = d.result?.winner ?? null;
     const w = winner ? (state.players ?? []).find((p) => p.username === winner) : null;
     state.duel = null;
-    return w?.alive ? enterPicking(state, winner) : enterSpin(state);
+    return w?.alive ? enterPicking(state, winner) : enterRoundIntro(state);
   }
 
   const t = state.turn;
@@ -443,13 +491,15 @@ function afterReveal(state, pool) {
     // a duel is the most interesting thing on the menu.
     return enterPicking(state, t.answering);
   }
-  return enterSpin(state);
+  return enterRoundIntro(state);
 }
 
 /** what a fired deadline does, per phase */
 function advanceOnDeadline(state, pool) {
   switch (state.phase) {
     case "countdown":
+      return enterRoundIntro(state);
+    case "round_intro":
       return enterSpin(state);
     case "spin":
       return enterQuestion(state, state.currentSpin?.target, pool);
@@ -467,7 +517,7 @@ function advanceOnDeadline(state, pool) {
       return afterReveal(state, pool);
     case "picking": {
       const choices = state.currentPick?.choices ?? [];
-      if (!choices.length) return enterSpin(state);
+      if (!choices.length) return enterRoundIntro(state);
       // a picker who says nothing still picks: a random target, in CHALLENGE
       // mode, with NO wager. Auto-staking someone's money on a bet they never
       // made would be the one place the engine could lose a player money
@@ -490,7 +540,7 @@ export {
   advanceOnDeadline,
   afterReveal,
   applyDuelAnswer,
-  creditRound,
+  creditTurn,
   difficultyFor,
   duelAnteBetween,
   eliminateBrokePlayers,
@@ -499,6 +549,7 @@ export {
   enterGameOver,
   enterPicking,
   enterQuestion,
+  enterRoundIntro,
   enterReveal,
   enterSpin,
   resolveDuel,

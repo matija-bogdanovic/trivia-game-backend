@@ -67,6 +67,14 @@ const CHAT_HISTORY_LIMIT = 50;
 // a setTimeout, because a Lambda that has returned cannot hold a timer. P2.1
 // points a scheduler at that timestamp.
 const COUNTDOWN_MS = 3000;      // room.ts ticks 3,2,1,0 then spins at t=3s
+/**
+ * The "Runda N" card, shown at the top of every wheel cycle. Long enough to
+ * read and register a number, short enough that it never feels like waiting —
+ * it is a beat between rounds, not a phase anything happens in. Tunable here:
+ * nothing else hardcodes it, and the deadline it produces is absolute like
+ * every other phase, so raising it cannot desynchronise a client.
+ */
+const ROUND_INTRO_MS = 2500;
 const SPIN_TIME_MS = 5000;
 const BASE_QUESTION_TIME_MS = 15000;
 const MIN_QUESTION_TIME_MS = 8000;
@@ -188,6 +196,7 @@ export {
   QUOTA_PRIOR_WEIGHT,
   REGION,
   REVEAL_MS,
+  ROUND_INTRO_MS,
   SPIN_TIME_MS,
   SPIN_WEIGHT_INITIAL,
   SPIN_WEIGHT_MAX,
