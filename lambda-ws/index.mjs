@@ -30,12 +30,19 @@
  * │           Elimination-at-0 is wired but standings/persistence are P2.4. │
  * └────────────────────────────────────────────────────────────────────────┘
  *
- * ── THE INVARIANT EVERY STEP MUST PRESERVE ────────────────────────────────
+ * ── THE INVARIANTS EVERY STEP MUST PRESERVE ───────────────────────────────
  *     sum(players[].money) + pot  is constant from start_game to game_over.
  * Stakes, antes and penalties move money INTO the pot; payouts move it OUT.
- * Nothing is minted and nothing is deleted, which is what makes elimination
- * inevitable without a house edge. Every new money path added below is
- * written as a transfer for exactly that reason.
+ * Every money path in this file is written as a transfer, so nothing appears
+ * or vanishes inside the ledger.
+ *
+ * ⚠ `pot >= 0` IS DELIBERATELY **NOT** AN INVARIANT (changed after P2.3).
+ *   A winning bet is paid the FULL stake × quota it was quoted, even when the
+ *   pot cannot fund it — the shortfall is borrowed against the pot, which is
+ *   allowed to run a deficit, and repaid by later losing stakes and penalties.
+ *   `max(0, -pot)` is the outstanding debt and `minted` is its running total.
+ *   Scaling payouts down instead (what P2.2 did) kept the pot non-negative but
+ *   made the advertised odds a lie. See settleBets for the full accounting.
  *
  * ── ENVIRONMENT VARIABLES ─────────────────────────────────────────────────
  *   CONNECTIONS_TABLE        Connections          (this file's own table)
@@ -639,6 +646,8 @@ function initialGameState(lobby, lobbyId, connRows) {
     round: 0,
     chainDepth: 0,
     pot: 0,
+    // running total of payouts the pot could not fund — see settleBets
+    minted: 0,
 
     players,
     lastSpinTarget: null,
@@ -668,6 +677,9 @@ function publicGameState(s) {
     round: s.round,
     chainDepth: s.chainDepth,
     pot: s.pot,
+    // CAN BE NEGATIVE — see settleBets. `minted` is how much has been paid to
+    // winners that the pot did not hold; `max(0, -pot)` is what is still owed.
+    minted: Number(s.minted ?? 0),
     code: s.code,
     roomName: s.roomName,
     minPlayers: s.minPlayers,
@@ -989,20 +1001,28 @@ function weightedPick(alive) {
 // THE POT — betting, quotas, settlement
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// THE INVARIANT, and the whole point of this step:
+// THE LEDGER IDENTITY, which every path here still honours:
 //
 //     sum(players[].money) + pot   is constant for the entire match
 //
-// Nothing is created and nothing is destroyed. A stake leaves the bettor and
-// enters the pot; a payout leaves the pot and enters the winner; a wrong
-// answer's penalty leaves the answerer and ENTERS THE POT rather than
-// vanishing. room.ts did the opposite on both counts — it paid winners out of
-// nowhere and deleted the wrong-answer penalty — which is why money there
-// could inflate and why nothing guaranteed anyone reached zero.
+// A stake leaves the bettor and enters the pot; a payout leaves the pot and
+// enters the winner; a wrong answer's penalty leaves the answerer and ENTERS
+// THE POT rather than vanishing. room.ts did the opposite on both counts — it
+// paid winners out of nowhere and deleted the wrong-answer penalty — which is
+// why money there could inflate and why nothing guaranteed anyone reached zero.
+//
+// WHAT IS NO LONGER TRUE, since Matija's payout ruling: the pot is not floored
+// at zero. A winning bet is paid its full quoted price and the pot absorbs any
+// shortfall as debt, so `pot` may be negative and `minted` counts how much has
+// been paid out that the game did not have. The identity above is unaffected —
+// the deficit lives in `pot`, not in thin air — and the deficit is repaid by
+// the very next losing stake or wrong-answer penalty.
 //
 // Money still concentrates: individuals are eliminated at 0 and the survivor
-// ends up holding it. That is the poker model Matija asked for, and it needs
-// no house edge to terminate.
+// ends up holding it. Losing bets, penalties and lost duel antes are what drive
+// that, and none of them changed. The mint slows the drain; it does not stop
+// it, because a payout is capped at 2× a stake and a stake is capped at the
+// bettor's own bankroll.
 
 /**
  * Alive, not the one answering, and holding at least the minimum stake.
@@ -1077,12 +1097,45 @@ function quotasFor(state) {
 }
 
 /**
- * Pay the winners out of the pot, exactly once per turn.
+ * Pay the winners, exactly once per turn. THE QUOTA IS A PROMISE.
  *
- * If the pot cannot cover everything owed, every payout is scaled down by the
- * same factor — the pot is a hard ceiling, so it can never be overdrawn. Any
- * remainder (losers' stakes, rounding dust, an unclaimed surplus) simply stays
- * in the pot and carries into the next round.
+ * ── WHAT CHANGED, AND WHY ─────────────────────────────────────────────────
+ * P2.2 treated the pot as a hard ceiling: if it could not cover everything
+ * owed, every payout was scaled down by the same factor. That kept money
+ * strictly conserved, but it made the advertised price a lie — the live P2.3
+ * run staked 150 at a quota of 2.00 and paid back exactly 150, a WINNING bet
+ * that gained nothing, because the pot held only that same stake. The number
+ * on the button said 2.00× and the number in the wallet said 1.00×.
+ *
+ * Matija's call: the displayed gain must be real. A winner now receives the
+ * FULL stake × quota, always, and when the pot cannot cover it the shortfall
+ * is MINTED rather than deducted from the winner.
+ *
+ * ── THE NEW ACCOUNTING ────────────────────────────────────────────────────
+ * The pot is now allowed to go NEGATIVE. That is the whole mechanism: a payout
+ * it cannot fund is borrowed against it, and later losses repay the debt. Two
+ * facts fall out, and both are checked by the tests:
+ *
+ *   sum(players[].money) + pot   is STILL constant.
+ *       Every movement is still a transfer. Nothing appears inside the ledger
+ *       — the money comes from the pot going into deficit.
+ *
+ *   pot >= 0                     is NO LONGER true.
+ *       `max(0, -pot)` is the outstanding debt: what has been paid out that
+ *       the game did not have. `state.minted` is the cumulative measure of it
+ *       across the match, and -pot <= minted holds always, because inflows
+ *       only ever repay.
+ *
+ * ── WHY THIS DOES NOT INFLATE AWAY ────────────────────────────────────────
+ * The mint is bounded by construction, not by a limiter: a payout can never
+ * exceed 2× the stake (QUOTA_MAX), and a stake can never exceed the bettor's
+ * own bankroll — so a turn cannot mint more than the money staked on it. Every
+ * losing stake and every WRONG_ANSWER_COST still flows INTO the pot, and those
+ * repay the deficit before any of it is minted again. Elimination still works
+ * the way it did: it is driven by losing bets, wrong-answer penalties and lost
+ * duel antes, all of which take money OUT of players and put it in the pot.
+ * The game still trends toward one player holding everything — it just no
+ * longer refuses to pay a winner the price it quoted them.
  */
 function settleBets(state) {
   const t = state.turn;
@@ -1093,24 +1146,22 @@ function settleBets(state) {
   );
   const isWinner = (b) => (b.side === "correct") === Boolean(t.correct);
 
-  const owed = staked
-    .filter(isWinner)
-    .reduce((sum, b) => sum + b.amount * b.quota, 0);
-  const pot = Number(state.pot ?? 0);
-  const payable = Math.min(owed, pot);
-  const scale = owed > 0 ? payable / owed : 0;
+  const potBefore = Number(state.pot ?? 0);
+  let paid = 0;
 
   const results = [];
   for (const b of staked) {
     const won = isWinner(b);
     let payout = 0;
     if (won) {
-      // floor, so the sum of payouts can never exceed `payable`
-      payout = Math.floor(b.amount * b.quota * scale);
+      // the FULL price, floored to whole coins. No scale factor: what the
+      // button advertised is what lands in the wallet
+      payout = Math.floor(b.amount * b.quota);
       const p = (state.players ?? []).find((x) => x.username === b.username);
       if (p) {
         p.money += payout;
         state.pot = Number(state.pot ?? 0) - payout;
+        paid += payout;
         p.stats = p.stats ?? { correct: 0, wrong: 0, betsWon: 0, maxBetWin: 0, roundsPlayed: 0 };
         p.stats.betsWon = Number(p.stats.betsWon ?? 0) + 1;
         p.stats.maxBetWin = Math.max(Number(p.stats.maxBetWin ?? 0), payout - b.amount);
@@ -1123,12 +1174,21 @@ function settleBets(state) {
       quota: b.quota,
       won,
       payout,
+      // gain, which is now always amount × (quota − 1) for a winner
       net: payout - b.amount,
     });
   }
 
+  // what the pot could not fund. A pot already in deficit contributes nothing,
+  // hence max(0, potBefore) rather than potBefore
+  const minted = Math.max(0, paid - Math.max(0, potBefore));
+  if (minted > 0) state.minted = Number(state.minted ?? 0) + minted;
+
   t.betsSettled = true;
-  t.betScale = Math.round(scale * 1000) / 1000;
+  t.betMinted = minted;
+  // kept on the wire for clients that read it — it is now always 1, because
+  // payouts are never scaled. Retired rather than removed.
+  t.betScale = 1;
   state.betResults = results;
   return results;
 }
@@ -1430,16 +1490,23 @@ function resolveDuel(state) {
   const ante = Math.max(0, Number(d.ante ?? 0));
 
   let payout = 0;
+  let minted = 0;
   if (winner && ante > 0) {
-    // the pot is a hard ceiling here exactly as it is in settleBets — the two
-    // antes went in moments ago so this never actually binds, but it is what
-    // makes "the pot cannot go negative" true by construction rather than by
-    // argument
-    payout = Math.min(ante * 2, Math.max(0, Number(state.pot ?? 0)));
+    // GUARANTEED, for the same reason a quota is: the duel promised the winner
+    // both antes, so the winner gets both antes. The pair went into the pot
+    // moments ago, so this only ever borrows when the pot was ALREADY in
+    // deficit from a minted bet payout — and letting that silently shortchange
+    // a duel winner would put back exactly the bug settleBets just fixed.
+    const potBefore = Number(state.pot ?? 0);
+    payout = ante * 2;
     const w = (state.players ?? []).find((p) => p.username === winner);
     if (w) {
       w.money = Number(w.money ?? 0) + payout;
-      state.pot = Number(state.pot ?? 0) - payout;
+      state.pot = potBefore - payout;
+      minted = Math.max(0, payout - Math.max(0, potBefore));
+      if (minted > 0) state.minted = Number(state.minted ?? 0) + minted;
+    } else {
+      payout = 0;
     }
   }
 
@@ -1459,6 +1526,7 @@ function resolveDuel(state) {
     loser,
     ante,
     payout,
+    minted,
     // net movement per racer, so the client never has to recompute it
     deltas: (d.players ?? []).map((u) => ({
       username: u,
@@ -1714,6 +1782,8 @@ function phaseMessage(state) {
           winner: r.winner ?? null,
           loser: r.loser ?? null,
           payout: Number(r.payout ?? 0),
+          minted: Number(r.minted ?? 0),
+          mintedTotal: Number(state.minted ?? 0),
           deltas: r.deltas ?? [],
           submissions: r.submissions ?? [],
           timedOut: r.timedOut ?? [],
@@ -1727,7 +1797,10 @@ function phaseMessage(state) {
         round: state.round,
         pot: Number(state.pot ?? 0),
         bets: state.betResults ?? [],
+        // always 1 now — payouts are never scaled down. Kept for clients.
         betScale: Number(state.turn?.betScale ?? 1),
+        minted: Number(state.turn?.betMinted ?? 0),
+        mintedTotal: Number(state.minted ?? 0),
         chainDepth: state.chainDepth,
         answering: state.turn?.answering,
         mode: state.turn?.mode ?? "open",
@@ -1758,8 +1831,11 @@ function phaseMessage(state) {
         type: "game_over",
         winner: state.winner ?? null,
         rounds: state.round,
-        // (d) whatever was still in the pot went to the winner
+        // (d) whatever was still in the pot went to the winner. A pot in
+        // DEFICIT awards nothing — the debt is not charged to the winner.
         potAwarded: Number(state.potAwarded ?? 0),
+        pot: Number(state.pot ?? 0),
+        minted: Number(state.minted ?? 0),
       };
     default:
       return null;
