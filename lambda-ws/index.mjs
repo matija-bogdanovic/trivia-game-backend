@@ -21,7 +21,7 @@
  * │ lib/aws.mjs              the shared DynamoDB document client            │
  * │ lib/auth.mjs             Cognito token verification, scrypt passwords   │
  * │ lib/connections.mjs      Connections table, postToConnection, fan-out   │
- * │ lib/lobbies.mjs          Lobbies + Wallets reads                        │
+ * │ lib/lobbies.mjs          Lobbies + Players reads                        │
  * │ lib/state.mjs            match state: shape, serialisation, version lock│
  * │ lib/questions.mjs        the pool, the deck, generated arithmetic       │
  * │ lib/turn.mjs             the phase stamp, the living list, the wheel    │
@@ -77,7 +77,7 @@
  * ── ENVIRONMENT VARIABLES ─────────────────────────────────────────────────
  *   Read in lib/config.mjs, all with working defaults:
  *   CONNECTIONS_TABLE · CONNECTIONS_LOBBY_INDEX · LOBBIES_TABLE ·
- *   WALLETS_TABLE · GAME_STATE_TABLE · QUESTIONS_TABLE · PHASE_TIMER_ARN ·
+ *   PLAYERS_TABLE · GAME_STATE_TABLE · QUESTIONS_TABLE · PHASE_TIMER_ARN ·
  *   WS_ENDPOINT · CONNECTION_TTL_SECONDS · COGNITO_USER_POOL_ID ·
  *   COGNITO_CLIENT_ID · COGNITO_REGION.
  *   Do NOT set AWS_REGION — it is reserved.

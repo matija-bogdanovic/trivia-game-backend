@@ -19,7 +19,7 @@
  *
  * ── REQUIRED ENVIRONMENT VARIABLES ─────────────────────────────────────────
  *   AVATAR_BUCKET          ipak-se-okrece-avatars
- *   WALLETS_TABLE          Wallets
+ *   PLAYERS_TABLE          Players
  *   COGNITO_USER_POOL_ID   eu-west-3_Uylh5ZFUK
  *   COGNITO_CLIENT_ID      3j69q67dfk60kl92gukqhdlr91
  *   ALLOWED_ORIGIN         https://<your-vercel-domain>,http://localhost:3000
@@ -37,7 +37,7 @@
  *         "Resource": "arn:aws:s3:::ipak-se-okrece-avatars/avatars/*" },
  *       { "Effect": "Allow",
  *         "Action": ["dynamodb:PutItem", "dynamodb:UpdateItem"],
- *         "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Wallets" }
+ *         "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Players" }
  *     ]
  *   }
  *   Plus AWSLambdaBasicExecutionRole for CloudWatch logs.
@@ -67,7 +67,7 @@
  *             400 { message: "Unsupported image format" }
  *             500 { message: "Internal server error" }
  *   Side effects: s3://ipak-se-okrece-avatars/avatars/{username}.jpg
- *                 Wallets.avatar = "u|<epoch-ms>"
+ *                 Players.avatar = "u|<epoch-ms>"
  *   Auth:     Authorization: Bearer <Cognito ACCESS token>
  *             401 { message: "Authentication required" } when absent/invalid.
  *             The username comes from the verified token, NEVER from the
@@ -99,7 +99,7 @@ import {
 const REGION = process.env.AWS_REGION || "eu-west-3";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? "http://localhost:3000";
 const AVATAR_BUCKET = process.env.AVATAR_BUCKET || "ipak-se-okrece-avatars";
-const WALLETS_TABLE = process.env.WALLETS_TABLE || "Wallets";
+const PLAYERS_TABLE = process.env.PLAYERS_TABLE || "Players";
 
 // clients at module scope so warm invocations reuse the connections
 const s3 = new S3Client({ region: REGION });
@@ -264,7 +264,7 @@ async function setAvatarPointer(username, avatar) {
   const update = (guarded) =>
     ddb.send(
       new UpdateCommand({
-        TableName: WALLETS_TABLE,
+        TableName: PLAYERS_TABLE,
         Key: { username },
         UpdateExpression: "SET avatar = :avatar",
         ExpressionAttributeValues: { ":avatar": avatar },
@@ -279,7 +279,7 @@ async function setAvatarPointer(username, avatar) {
     try {
       await ddb.send(
         new PutCommand({
-          TableName: WALLETS_TABLE,
+          TableName: PLAYERS_TABLE,
           Item: freshWallet(username, avatar),
           ConditionExpression: "attribute_not_exists(username)",
         })

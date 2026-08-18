@@ -39,7 +39,7 @@
  * ── ENVIRONMENT VARIABLES ──────────────────────────────────────────────────
  *   The union of every handler's needs, on this one function:
  *     ALLOWED_ORIGIN, COGNITO_USER_POOL_ID, COGNITO_CLIENT_ID,
- *     WALLETS_TABLE, LOBBIES_TABLE, MATCHES_TABLE, AVATAR_BUCKET
+ *     PLAYERS_TABLE, LOBBIES_TABLE, MATCHES_TABLE, AVATAR_BUCKET
  *   All have working defaults. Do NOT set AWS_REGION (reserved).
  *
  * ── IAM ────────────────────────────────────────────────────────────────────

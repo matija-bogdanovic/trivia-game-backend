@@ -1,6 +1,6 @@
 /**
  * ===========================================================================
- * lib/lobbies.mjs — reads against the Lobbies and Wallets tables
+ * lib/lobbies.mjs — reads against the Lobbies and Players tables
  * ===========================================================================
  * Part of the ipakseokrece WebSocket Lambda. Split out of the single-file
  * index.mjs with NO behaviour change: every line below is the original line.
@@ -12,7 +12,7 @@ import {
   QueryCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { ddb } from "./aws.mjs";
-import { LOBBIES_TABLE, WALLETS_TABLE } from "./config.mjs";
+import { LOBBIES_TABLE, PLAYERS_TABLE } from "./config.mjs";
 
 // ─── the Lobbies table (shared with the REST stack) ────────────────────────
 /** accepts a lobby_id (UUID, the URL form) or a numeric room code */
@@ -41,7 +41,7 @@ async function resolveLobby(idOrCode) {
 async function walletProfile(username) {
   try {
     const res = await ddb.send(
-      new GetCommand({ TableName: WALLETS_TABLE, Key: { username } })
+      new GetCommand({ TableName: PLAYERS_TABLE, Key: { username } })
     );
     return {
       streak: Number(res.Item?.currentStreak ?? 0),

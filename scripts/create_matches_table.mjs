@@ -1,6 +1,6 @@
 // One-off: creates the Matches table (PK: match_id) holding one item per
 // finished match — final standings, winner, margin, rounds. Players keep a
-// trimmed copy of each match in their own Wallets record; this table is what
+// trimmed copy of each match in their own Players record; this table is what
 // a match-detail lookup reads. Safe to re-run — skips if the table exists.
 import {
   DynamoDBClient,

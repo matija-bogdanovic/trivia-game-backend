@@ -1,5 +1,7 @@
-// One-off: creates the Wallets table (PK: username) used for lobby credits,
-// shop coins, and owned avatars. Safe to re-run — skips if the table exists.
+// One-off: creates the Players table (PK: username) — the full player record:
+// money, stats, lobby credits, shop coins, owned avatars, friends, achievements.
+// Safe to re-run — skips if the table exists. (Was 'Wallets' until the table was
+// renamed; DynamoDB cannot rename, so that was a create-copy-cutover-delete.)
 import {
   DynamoDBClient,
   CreateTableCommand,
@@ -12,17 +14,17 @@ import 'dotenv/config';
 const client = new DynamoDBClient({ region: 'eu-west-3' });
 
 try {
-  await client.send(new DescribeTableCommand({ TableName: 'Wallets' }));
-  console.log('Wallets table already exists — nothing to do.');
+  await client.send(new DescribeTableCommand({ TableName: 'Players' }));
+  console.log('Players table already exists — nothing to do.');
 } catch (err) {
   if (err.name !== 'ResourceNotFoundException') throw err;
   await client.send(
     new CreateTableCommand({
-      TableName: 'Wallets',
+      TableName: 'Players',
       AttributeDefinitions: [{ AttributeName: 'username', AttributeType: 'S' }],
       KeySchema: [{ AttributeName: 'username', KeyType: 'HASH' }],
       BillingMode: 'PAY_PER_REQUEST',
     })
   );
-  console.log('Wallets table created (on-demand billing).');
+  console.log('Players table created (on-demand billing).');
 }

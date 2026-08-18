@@ -26,7 +26,7 @@
       "Resource": "arn:aws:s3:::ipak-se-okrece-avatars"
     },
     {
-      "Sid": "WalletsTable",
+      "Sid": "PlayersTable",
       "Effect": "Allow",
       "Action": [
         "dynamodb:GetItem",
@@ -34,7 +34,7 @@
         "dynamodb:UpdateItem",
         "dynamodb:Scan"
       ],
-      "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Wallets"
+      "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Players"
     },
     {
       "Sid": "LobbiesTable",

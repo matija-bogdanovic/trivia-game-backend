@@ -75,10 +75,10 @@
       "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Lobbies/index/code-index"
     },
     {
-      "Sid": "WalletsProfileRead",
+      "Sid": "PlayersProfileRead",
       "Effect": "Allow",
       "Action": "dynamodb:GetItem",
-      "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Wallets"
+      "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Players"
     }
   ]
 }

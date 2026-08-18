@@ -25,7 +25,7 @@ const WS_ENDPOINT =
   "https://j803en0pf7.execute-api.eu-west-3.amazonaws.com/prod";
 const LOBBY_INDEX = process.env.CONNECTIONS_LOBBY_INDEX || "lobby-index";
 const LOBBIES_TABLE = process.env.LOBBIES_TABLE || "Lobbies";
-const WALLETS_TABLE = process.env.WALLETS_TABLE || "Wallets";
+const PLAYERS_TABLE = process.env.PLAYERS_TABLE || "Players";
 const CONNECTION_TTL_SECONDS = Number(process.env.CONNECTION_TTL_SECONDS || 7200);
 // ─── game constants (mirrors src/server/game/room.ts) ──────────────────────
 const MIN_PLAYERS = 2;
@@ -206,7 +206,7 @@ export {
   STARTING_MONEY,
   STATE_MAX_ATTEMPTS,
   STATE_TTL_SECONDS,
-  WALLETS_TABLE,
+  PLAYERS_TABLE,
   WRONG_ANSWER_COST,
   WS_ENDPOINT,
   capacityOf,

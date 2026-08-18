@@ -17,7 +17,7 @@
  *
  * ── REQUIRED ENVIRONMENT VARIABLES ─────────────────────────────────────────
  *   LOBBIES_TABLE          Lobbies
- *   WALLETS_TABLE          Wallets
+ *   PLAYERS_TABLE          Players
  *   COGNITO_USER_POOL_ID   eu-west-3_Uylh5ZFUK
  *   COGNITO_CLIENT_ID      3j69q67dfk60kl92gukqhdlr91
  *   ALLOWED_ORIGIN         https://<your-vercel-domain>,http://localhost:3000
@@ -35,7 +35,7 @@
  *         "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Lobbies" },
  *       { "Effect": "Allow",
  *         "Action": ["dynamodb:GetItem", "dynamodb:PutItem"],
- *         "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Wallets" }
+ *         "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Players" }
  *     ]
  *   }
  *   Plus AWSLambdaBasicExecutionRole for CloudWatch logs.
@@ -120,7 +120,7 @@ import {
 const REGION = process.env.AWS_REGION || "eu-west-3";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? "http://localhost:3000";
 const LOBBIES_TABLE = process.env.LOBBIES_TABLE || "Lobbies";
-const WALLETS_TABLE = process.env.WALLETS_TABLE || "Wallets";
+const PLAYERS_TABLE = process.env.PLAYERS_TABLE || "Players";
 
 // clients at module scope so warm invocations reuse the connections
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
@@ -336,7 +336,7 @@ function msUntilNextCredit(wallet) {
 
 async function getWallet(username) {
   const res = await ddb.send(
-    new GetCommand({ TableName: WALLETS_TABLE, Key: { username } })
+    new GetCommand({ TableName: PLAYERS_TABLE, Key: { username } })
   );
   const wallet = withDefaults(res.Item ?? freshWallet(username));
   refill(wallet);
@@ -346,7 +346,7 @@ async function getWallet(username) {
 /** like getWallet but returns null instead of inventing a row */
 async function getWalletIfExists(username) {
   const res = await ddb.send(
-    new GetCommand({ TableName: WALLETS_TABLE, Key: { username } })
+    new GetCommand({ TableName: PLAYERS_TABLE, Key: { username } })
   );
   if (!res.Item) return null;
   const wallet = withDefaults(res.Item);
@@ -355,7 +355,7 @@ async function getWalletIfExists(username) {
 }
 
 async function saveWallet(wallet) {
-  await ddb.send(new PutCommand({ TableName: WALLETS_TABLE, Item: wallet }));
+  await ddb.send(new PutCommand({ TableName: PLAYERS_TABLE, Item: wallet }));
 }
 
 // ─── private-room passwords: scrypt, not bcrypt ────────────────────────────

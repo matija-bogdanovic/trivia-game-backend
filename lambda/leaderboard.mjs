@@ -16,7 +16,7 @@
  * └─────────────────────────────────────────────────────────────────────────┘
  *
  * ── REQUIRED ENVIRONMENT VARIABLES ─────────────────────────────────────────
- *   WALLETS_TABLE          Wallets
+ *   PLAYERS_TABLE          Players
  *   ALLOWED_ORIGIN         https://<your-vercel-domain>,http://localhost:3000
  *   AWS_REGION             set automatically by Lambda — do NOT add it by hand
  *                          (Lambda rejects reserved env var names).
@@ -29,7 +29,7 @@
  *     "Statement": [
  *       { "Effect": "Allow",
  *         "Action": ["dynamodb:Scan"],
- *         "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Wallets" }
+ *         "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Players" }
  *     ]
  *   }
  *   Plus AWSLambdaBasicExecutionRole for CloudWatch logs.
@@ -56,7 +56,7 @@
  *
  * ── NOTE ───────────────────────────────────────────────────────────────────
  *   This is a full table Scan, exactly as the Express version does. It reads
- *   at most 1 MB per call and does NOT paginate, so once Wallets grows past
+ *   at most 1 MB per call and does NOT paginate, so once Players grows past
  *   ~1 MB the leaderboard silently considers only the first page. That is
  *   pre-existing behaviour, carried over unchanged — see lambda/README.md.
  *
@@ -73,7 +73,7 @@ import {
 // ─── config ────────────────────────────────────────────────────────────────
 const REGION = process.env.AWS_REGION || "eu-west-3";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? "http://localhost:3000";
-const WALLETS_TABLE = process.env.WALLETS_TABLE || "Wallets";
+const PLAYERS_TABLE = process.env.PLAYERS_TABLE || "Players";
 
 // clients at module scope so warm invocations reuse the connections
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
@@ -123,7 +123,7 @@ export const handler = async (event) => {
   }
 
   try {
-    const scan = await ddb.send(new ScanCommand({ TableName: WALLETS_TABLE }));
+    const scan = await ddb.send(new ScanCommand({ TableName: PLAYERS_TABLE }));
     const top = (scan.Items ?? [])
       .map((w) => ({
         username: w.username,
