@@ -147,6 +147,9 @@ function phaseMessage(state) {
         type: "game_over",
         winner: state.winner ?? null,
         rounds: state.round,
+        // the final table, already ordered: survivors first, then by money,
+        // then by who survived LONGER (eliminatedAt descending)
+        standings: state.standings ?? [],
         // (d) whatever was still in the pot went to the winner. A pot in
         // DEFICIT awards nothing — the debt is not charged to the winner.
         potAwarded: Number(state.potAwarded ?? 0),

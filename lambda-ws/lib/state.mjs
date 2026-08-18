@@ -194,6 +194,10 @@ function publicGameState(s) {
       connected: p.connected,
       isHost: p.isHost,
       isSpectator: p.isSpectator,
+      // when they went out (epoch ms), null while still playing. The gameover
+      // standings rank the eliminated by this — everyone out holds 0, so it is
+      // the only thing separating them.
+      eliminatedAt: p.eliminatedAt ?? null,
       streak: p.streak,
       spinWeight: p.spinWeight,
       stats: p.stats,

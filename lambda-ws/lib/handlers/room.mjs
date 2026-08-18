@@ -22,7 +22,7 @@ import {
 } from "../connections.mjs";
 import { resolveLobby } from "../lobbies.mjs";
 import { broadcastPhase, systemChat } from "../messages.mjs";
-import { enterGameOver } from "../phases.mjs";
+import { enterGameOver, markEliminated } from "../phases.mjs";
 import { broadcastLobbyState } from "../presence.mjs";
 import { rearmPhaseTimer } from "../scheduler.mjs";
 import { mutateGameState, readGameState } from "../state.mjs";
@@ -332,6 +332,9 @@ async function onKickPlayer(event, connectionId, row, msg) {
       p.money = 0;
       p.alive = false;
       p.connected = false;
+      // out of the match, so out at THIS moment — the standings rank the
+      // eliminated by who lasted longer, and a forfeit is an elimination
+      markEliminated(p);
       s.pot = Number(s.pot ?? 0) + forfeited;
       s.kicked = [...(s.kicked ?? []), target];
       // the match cannot continue with one player standing

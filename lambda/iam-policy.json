@@ -10,13 +10,19 @@
     {
       "Sid": "CloudWatchLogStreams",
       "Effect": "Allow",
-      "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
       "Resource": "arn:aws:logs:eu-west-3:637423486388:log-group:/aws/lambda/*:*"
     },
     {
       "Sid": "AvatarObjects",
       "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
       "Resource": "arn:aws:s3:::ipak-se-okrece-avatars/avatars/*"
     },
     {
@@ -29,10 +35,11 @@
       "Sid": "PlayersTable",
       "Effect": "Allow",
       "Action": [
+        "dynamodb:DeleteItem",
         "dynamodb:GetItem",
         "dynamodb:PutItem",
-        "dynamodb:UpdateItem",
-        "dynamodb:Scan"
+        "dynamodb:Scan",
+        "dynamodb:UpdateItem"
       ],
       "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Players"
     },

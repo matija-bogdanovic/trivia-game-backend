@@ -46,8 +46,25 @@ function enterBetting(state) {
 function enterGameOver(state) {
   const ranked = [...(state.players ?? [])]
     .filter((p) => !p.isSpectator)
-    .sort((a, b) => (a.alive !== b.alive ? (a.alive ? -1 : 1) : b.money - a.money));
+    .sort((a, b) => {
+      // survivors first, then the bigger pile…
+      if (a.alive !== b.alive) return a.alive ? -1 : 1;
+      if (b.money !== a.money) return b.money - a.money;
+      // …and among the eliminated, WHO LASTED LONGER places higher. Every
+      // eliminated player holds exactly 0, so without this they would tie on
+      // money and land in whatever order the array happened to be in.
+      return Number(b.eliminatedAt ?? 0) - Number(a.eliminatedAt ?? 0);
+    });
   state.winner = ranked[0]?.username ?? null;
+  // the final table, already in order, so the client never has to re-derive it
+  state.standings = ranked.map((p, i) => ({
+    place: i + 1,
+    username: p.username,
+    displayName: p.displayName,
+    money: Number(p.money ?? 0),
+    alive: Boolean(p.alive),
+    eliminatedAt: p.eliminatedAt ?? null,
+  }));
 
   const remainder = Math.max(0, Math.floor(Number(state.pot ?? 0)));
   state.potAwarded = 0;
@@ -274,13 +291,29 @@ function enterDuel(state, pickerName, targetName, pool) {
   return state;
 }
 
+/**
+ * Stamp the moment a player went out. FIRST STAMP WINS — an elimination is a
+ * one-time event, and a later sweep re-reading a state where they are already
+ * dead must not move the time. That matters because the gameover standings
+ * rank broke players by WHO SURVIVED LONGER: everyone eliminated has exactly
+ * 0 money, so this timestamp is the only thing that separates them, and a
+ * re-stamp would silently reorder the final table.
+ */
+function markEliminated(player, at = nowMs()) {
+  if (!player) return null;
+  if (!player.eliminatedAt) player.eliminatedAt = at;
+  return player.eliminatedAt;
+}
+
 /** anyone who has hit zero is out; shared by both resolution paths */
 function eliminateBrokePlayers(state) {
   state.eliminated = [];
+  const at = nowMs();
   for (const p of state.players ?? []) {
     if (p.alive && p.money <= 0) {
       p.money = 0;
       p.alive = false;
+      markEliminated(p, at);
       state.eliminated.push(p.username);
     }
   }
@@ -552,5 +585,6 @@ export {
   enterRoundIntro,
   enterReveal,
   enterSpin,
+  markEliminated,
   resolveDuel,
 };

@@ -49,6 +49,7 @@
  * ── ROUTES ─────────────────────────────────────────────────────────────────
  *   POST /avatar                 GET  /avatar/img/{username}
  *   POST /wallet                 GET  /lobbies
+ *   POST /account/delete         (irreversible: Cognito user + Players row)
  *   POST /shop/buy               GET  /leaderboard
  *   POST /friends/list           GET  /getActiveRooms
  *   POST /friends/action         POST /matches/detail
@@ -70,6 +71,7 @@ const ROUTES = {
   "POST /avatar": "./avatarUpload.mjs",
   "POST /wallet": "./wallet.mjs",
   "POST /shop/buy": "./shopBuy.mjs",
+  "POST /account/delete": "./accountDelete.mjs",
   "POST /friends/list": "./friendsList.mjs",
   "POST /friends/action": "./friendsAction.mjs",
   "POST /matches/detail": "./matchDetail.mjs",
