@@ -3,3 +3,5 @@
 .env.local
 /build
 /lambda/node_modules
+# build artefact: the deploy zip, rebuilt by the command in lambda/README.md
+ipakseokrece-lambda.zip
