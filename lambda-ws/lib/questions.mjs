@@ -10,6 +10,8 @@
 import { ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { ddb } from "./aws.mjs";
 import {
+  DECK_SLICE_SIZE,
+  DECK_USED_LIMIT,
   DEFAULT_LANGUAGE,
   MATH_QUESTION_CHANCE,
   MIN_LANGUAGE_POOL,
@@ -151,6 +153,24 @@ function idsForLanguage(pool, language) {
 }
 
 /**
+ * A fresh handful of question ids for the deck, avoiding what this match has
+ * already asked.
+ *
+ * The shuffle happens over the WHOLE language pool but only DECK_SLICE_SIZE
+ * ids survive into the returned array — the expensive part is in memory, on a
+ * warm container, and only the cheap part is written to the record.
+ *
+ * Returns [] when every question in the language has been asked, which is the
+ * caller's signal to start the pool over.
+ */
+function sliceForDeck(pool, language, used) {
+  const spent = new Set(used ?? []);
+  const available = idsForLanguage(pool, language).filter((id) => !spent.has(id));
+  if (!available.length) return [];
+  return shuffle(available).slice(0, DECK_SLICE_SIZE);
+}
+
+/**
  * Draw for the requested tier. The deck persists as id lists on the state so a
  * match does not repeat a question until the pool is exhausted; the drawn
  * question itself is copied into `turn` so nothing has to be re-resolved.
@@ -160,26 +180,31 @@ function drawQuestion(state, difficulty, pool) {
   if (!state.deck) state.deck = { fresh: [], used: [] };
 
   /*
-   * SEED THE DECK. It starts { fresh: [], used: [] } and nothing filled it —
-   * so `fresh` was empty, `used` was empty, the reshuffle below produced
-   * nothing, and every single draw fell through to generateMathQuestion(). The
-   * whole table was unreachable: a match was 100% arithmetic no matter how
-   * many questions had been imported.
+   * SEED THE DECK — a SLICE of it, never the whole pool.
    *
-   * The seed is language-scoped, which is also what makes a match monolingual
-   * — the deck is the only source of table questions, so filtering it filters
-   * everything. `deckLanguage` is stamped alongside so a match whose language
-   * was decided before the deck existed still reshuffles from the right pool.
+   * It starts { fresh: [], used: [] } and nothing used to fill it, so every
+   * draw fell through to generateMathQuestion() and the table was unreachable
+   * entirely. Seeding fixed that; seeding it with all ~5,300 ids replaced one
+   * bug with a quieter one, because this record is PUT in full on every phase
+   * transition and that deck is ~160KB of it. So the deck carries
+   * DECK_SLICE_SIZE ids and is refilled when it runs dry — same behaviour, a
+   * fortieth of the bytes.
+   *
+   * The slice is language-scoped, which is what makes a match monolingual:
+   * the deck is the only source of table questions, so filtering it filters
+   * everything. `deckLanguage` is stamped alongside for diagnosis.
    */
   const language = state.language || DEFAULT_LANGUAGE;
-  if (!state.deck.fresh.length && !state.deck.used.length) {
-    state.deck.fresh = shuffle(idsForLanguage(pool, language));
-    state.deck.deckLanguage = language;
-  }
-
   if (!state.deck.fresh.length) {
-    state.deck.fresh = shuffle(state.deck.used);
-    state.deck.used = [];
+    let slice = sliceForDeck(pool, language, state.deck.used);
+    if (!slice.length) {
+      // every question in this language has been asked — start the pool over
+      // rather than dropping the rest of the match to arithmetic
+      state.deck.used = [];
+      slice = sliceForDeck(pool, language, []);
+    }
+    state.deck.fresh = slice;
+    state.deck.deckLanguage = language;
   }
   if (!state.deck.fresh.length) return generateMathQuestion(difficulty);
 
@@ -190,6 +215,11 @@ function drawQuestion(state, difficulty, pool) {
   if (idx < 0) idx = 0;
   const [id] = state.deck.fresh.splice(idx, 1);
   state.deck.used.push(id);
+  // `used` grows one id per question asked, so a normal match never reaches
+  // the cap — it is here so no match can grow this record without a bound
+  if (state.deck.used.length > DECK_USED_LIMIT) {
+    state.deck.used = state.deck.used.slice(-DECK_USED_LIMIT);
+  }
   return pool.byId.get(id) ?? generateMathQuestion(difficulty);
 }
 
@@ -197,6 +227,7 @@ export {
   drawQuestion,
   generateMathQuestion,
   idsForLanguage,
+  sliceForDeck,
   loadQuestionPool,
   normalizeQuestion,
   randInt,

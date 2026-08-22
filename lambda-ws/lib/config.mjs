@@ -109,6 +109,30 @@ const SUPPORTED_LANGUAGES = ["en", "sr"];
  * 40 is roughly two long matches' worth at this chain depth.
  */
 const MIN_LANGUAGE_POOL = 40;
+
+/**
+ * How many question ids a match holds in its deck at once.
+ *
+ * THE WHOLE POOL DOES NOT GO IN THE RECORD. The GameState item is rewritten
+ * in full on every phase transition, so anything stored on it is paid for a
+ * hundred times a match — and a full-pool deck is ~5,300 ids, about 160KB,
+ * which is 40% of DynamoDB's 400KB item ceiling and ~160 extra WCUs on every
+ * single write. A match asks a few dozen questions; holding five thousand
+ * ready is pure weight.
+ *
+ * 150 is far more than any match consumes, so the slice is refilled rarely
+ * (usually never), and it costs ~4KB.
+ */
+const DECK_SLICE_SIZE = 150;
+
+/**
+ * Ceiling on the "already asked" list, which is what keeps a match from
+ * repeating itself. It grows one id per question, so a normal match never
+ * approaches this — it is a bound against a pathologically long game, not a
+ * tuning knob. Past it the oldest are forgotten and may come round again,
+ * which is the right trade against an item that cannot be written at all.
+ */
+const DECK_USED_LIMIT = 400;
 /** what a wrong answer or a timeout costs the answerer */
 const WRONG_ANSWER_COST = 100;
 /** smallest stake, and the floor for being counted as an eligible bettor */
@@ -203,6 +227,8 @@ export {
   GAME_STATE_TABLE,
   LOBBIES_TABLE,
   LOBBY_INDEX,
+  DECK_SLICE_SIZE,
+  DECK_USED_LIMIT,
   DEFAULT_LANGUAGE,
   MATH_QUESTION_CHANCE,
   MIN_LANGUAGE_POOL,

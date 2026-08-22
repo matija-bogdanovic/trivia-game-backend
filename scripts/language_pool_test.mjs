@@ -20,8 +20,16 @@
  * ===========================================================================
  */
 
-import { drawQuestion, idsForLanguage } from "../lambda-ws/lib/questions.mjs";
-import { MIN_LANGUAGE_POOL } from "../lambda-ws/lib/config.mjs";
+import {
+  drawQuestion,
+  idsForLanguage,
+  sliceForDeck,
+} from "../lambda-ws/lib/questions.mjs";
+import {
+  DECK_SLICE_SIZE,
+  DECK_USED_LIMIT,
+  MIN_LANGUAGE_POOL,
+} from "../lambda-ws/lib/config.mjs";
 
 let pass = 0;
 const failures = [];
@@ -163,6 +171,77 @@ console.log("\n── no language set (an old match state) plays English ──"
     langs.add(langOf(pool, q));
   }
   check("defaults to en", [...langs], ["en"]);
+}
+
+console.log("\n── the deck is BOUNDED — it must never hold the whole pool ──");
+{
+  const pool = makePool({ en: 5289, sr: 5277 });
+  const state = { language: "en", deck: { fresh: [], used: [] } };
+  // draw until the deck is actually seeded — ~30% of draws return arithmetic
+  // and never reach the seeding branch, so one call can leave it untouched and
+  // make every assertion below pass on an empty deck
+  for (let i = 0; i < 50 && !state.deck.deckLanguage; i++) drawQuestion(state, 2, pool);
+  check("the deck really was seeded", state.deck.deckLanguage, "en");
+  check("slice holds something", state.deck.fresh.length > 0, true);
+  check("slice is capped", state.deck.fresh.length <= DECK_SLICE_SIZE, true);
+  check("slice is not the whole pool", state.deck.fresh.length < 200, true);
+
+  // the record is PUT in full every phase transition, so its size is the point
+  const bytes = JSON.stringify(state.deck).length;
+  check("deck serialises small (<10KB)", bytes < 10_000, true);
+  console.log(`       deck is ${(bytes / 1024).toFixed(1)}KB, vs ~160KB for the full pool`);
+}
+
+console.log("\n── it refills when the slice runs dry, and stays bounded ──");
+{
+  const pool = makePool({ en: 5289 });
+  const state = { language: "en", deck: { fresh: [], used: [] } };
+  let fromTable = 0;
+  let maxFresh = 0;
+  for (let i = 0; i < 900; i++) {
+    const q = drawQuestion(state, ((i % 3) + 1), pool);
+    if (!String(q.id).startsWith("math-")) fromTable++;
+    maxFresh = Math.max(maxFresh, state.deck.fresh.length);
+  }
+  check("kept dealing past one slice", fromTable > DECK_SLICE_SIZE, true);
+  check("fresh never exceeded the cap", maxFresh <= DECK_SLICE_SIZE, true);
+  check("used stayed under its cap", state.deck.used.length <= DECK_USED_LIMIT, true);
+}
+
+console.log("\n── no repeats inside a match, across a refill ──");
+{
+  const pool = makePool({ en: 5289 });
+  const state = { language: "en", deck: { fresh: [], used: [] } };
+  const seen = [];
+  for (let i = 0; i < 400; i++) {
+    const q = drawQuestion(state, 2, pool);
+    if (!String(q.id).startsWith("math-")) seen.push(q.id);
+  }
+  check("every table question was distinct", new Set(seen).size, seen.length);
+  check("and there were plenty of them", seen.length > DECK_SLICE_SIZE, true);
+}
+
+console.log("\n── a pool smaller than one slice still works ──");
+{
+  const pool = makePool({ en: 60 });
+  const state = { language: "en", deck: { fresh: [], used: [] } };
+  let fromTable = 0;
+  for (let i = 0; i < 300; i++) {
+    const q = drawQuestion(state, 2, pool);
+    if (!String(q.id).startsWith("math-")) fromTable++;
+  }
+  // 60 questions, ~210 non-math draws: it must wrap rather than dry up
+  check("wraps instead of drying up", fromTable > 150, true);
+}
+
+console.log("\n── sliceForDeck avoids what was already asked ──");
+{
+  const pool = makePool({ en: 300 });
+  const used = idsForLanguage(pool, "en").slice(0, 250);
+  const slice = sliceForDeck(pool, "en", used);
+  check("only unasked ids offered", slice.filter((id) => used.includes(id)).length, 0);
+  check("offered what remained", slice.length, 50);
+  check("nothing left to offer -> empty", sliceForDeck(pool, "en", idsForLanguage(pool, "en")).length, 0);
 }
 
 console.log(`\n${"=".repeat(60)}`);
