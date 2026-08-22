@@ -149,12 +149,36 @@ async function onJoin(event, connectionId, msg, row) {
   // except the memory now survives the process.
   const running = await readGameState(canonicalId);
   if (running && running.phase !== "gameover") {
+    /*
+     * SPECTATING. The resync above is already everything a spectator needs —
+     * the same live state a player gets, with the remaining time on the
+     * current phase. What they also need is to be TOLD, on the first message
+     * rather than by inferring it from their own absence: a socket that
+     * joined after the host started is not in `players` and never will be
+     * until the next match reseats from the roster.
+     *
+     * Sent only on this per-socket push. The broadcast form of `game_state`
+     * goes to the whole lobby and cannot carry a per-viewer answer, so the
+     * client keeps deriving its own status from the roster after this — this
+     * flag is the opening statement, not the running one.
+     */
+    const spectating = !(running.players ?? []).some(
+      (p) => p.username === username
+    );
     await postTo(event, connectionId, {
       type: "game_state",
       state: publicGameState(running),
+      spectating,
     });
     const pm = phaseMessage(running);
     if (pm) await postTo(event, connectionId, pm);
+    if (spectating) {
+      await postTo(event, connectionId, {
+        type: "spectating",
+        lobbyId: canonicalId,
+        message: "The match is already running — you are watching it.",
+      });
+    }
   }
   if (isNew) {
     await systemChat(event, canonicalId, `${displayName} joined the room`, "joined");

@@ -36,6 +36,43 @@ import {
  * the scheduler: rearmPhaseTimer() starts a Step Functions execution that
  * sleeps until `phaseEndsAt` and then drives the match forward.
  */
+/*
+ * ═══════════════════════════════════════════════════════════════════════════
+ * SPECTATORS
+ * ═══════════════════════════════════════════════════════════════════════════
+ * A spectator is someone holding a socket on this lobby who is not in the
+ * running match's `players`. The roster is fixed when the host starts —
+ * initialGameState() takes the seats connected at that instant — so anyone
+ * who arrived after that is watching.
+ *
+ * THE REFUSALS BELOW ARE BELT AND BRACES, and that is deliberate. Every
+ * action is ALREADY closed to a spectator by the rules it enforces anyway:
+ * submit_answer requires being `turn.answering`, pick_player requires being
+ * `currentPick.picker`, and place_bet looks the caller up in `s.players` and
+ * bails when they are absent. The wheel can only land on someone in that
+ * array, so a spectator can never be any of those things.
+ *
+ * What was missing is that each of those paths refuses in SILENCE — the
+ * mutation returns null and nothing is sent back. For a player that is right
+ * (they pressed something stale), but for a spectator it looks like the app
+ * ignored them. These guards answer instead, and answer before the state is
+ * mutated, so the reason is the true one rather than whichever rule happened
+ * to reject them first.
+ */
+function isSpectator(state, username) {
+  if (!state || state.phase === "gameover") return false;
+  return !(state.players ?? []).some((p) => p.username === username);
+}
+
+async function refuseSpectator(event, connectionId, action) {
+  await postTo(event, connectionId, {
+    type: "error",
+    reason: "spectator",
+    action,
+    message: "You are watching this match, not playing in it.",
+  });
+}
+
 async function onStartGame(event, connectionId, row) {
   const lobbyId = row.lobbyId;
   const lobby = await resolveLobby(lobbyId);
@@ -124,6 +161,10 @@ async function onSubmitAnswer(event, connectionId, row, msg) {
   }
   const answer = String(msg.answer ?? "");
   const before = await readGameState(row.lobbyId);
+  if (isSpectator(before, row.username)) {
+    await refuseSpectator(event, connectionId, "submit_answer");
+    return;
+  }
   let phaseMoved = false;
 
   const res = await mutateGameState(row.lobbyId, (s) => {
@@ -180,6 +221,10 @@ async function onPlaceBet(event, connectionId, row, msg) {
   }
   const side = String(msg.side ?? msg.bet ?? "");
   const before = await readGameState(row.lobbyId);
+  if (isSpectator(before, row.username)) {
+    await refuseSpectator(event, connectionId, "place_bet");
+    return;
+  }
   let closedEarly = false;
 
   const res = await mutateGameState(row.lobbyId, (s) => {
@@ -272,6 +317,10 @@ async function onPickPlayer(event, connectionId, row, msg) {
   const side = msg.side === undefined || msg.side === null ? null : String(msg.side);
   const pool = await loadQuestionPool();
   const before = await readGameState(row.lobbyId);
+  if (isSpectator(before, row.username)) {
+    await refuseSpectator(event, connectionId, "pick_player");
+    return;
+  }
 
   // set fresh on every attempt — mutateGameState replays the closure on a
   // version conflict, and a stale flag from the losing attempt must not survive

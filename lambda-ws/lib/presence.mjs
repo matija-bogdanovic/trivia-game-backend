@@ -10,6 +10,7 @@
 import { MIN_PLAYERS, capacityOf, startingMoneyOf } from "./config.mjs";
 import { broadcast, connectionsInLobby } from "./connections.mjs";
 import { resolveLobby } from "./lobbies.mjs";
+import { readGameState } from "./state.mjs";
 
 // ─── presence ──────────────────────────────────────────────────────────────
 /**
@@ -19,13 +20,41 @@ import { resolveLobby } from "./lobbies.mjs";
  *   Lobbies.players  — the seat roster and who is Admin (host)
  *   Connections      — who is actually holding a socket right now
  *
- * A connected player who is not on the roster is still shown: in `lobby` phase
- * GameRoom.addPlayer() seats them rather than making them a spectator, and
- * Phase 0 is always in `lobby` phase because there is no turn engine yet.
+ * A connected player who is not on the roster is still shown.
+ *
+ * ── SPECTATORS ─────────────────────────────────────────────────────────────
+ * `isSpectator` was hardcoded false here, with a note saying the phase was
+ * always "lobby" because there was no turn engine. There is one now, so the
+ * flag can be what it always meant: a match is running and this person is not
+ * in it.
+ *
+ * That is the whole definition, and it needs no stored field. The match
+ * roster is fixed when the host starts — initialGameState() takes the seats
+ * that were connected at that moment — so anyone holding a socket on this
+ * lobby who is NOT in `state.players` arrived too late to play. They are
+ * watching, and every action path already refuses them for the same reason
+ * (see the note in handlers/game.mjs).
+ *
+ * `alive` follows the match too. It used to be hardcoded true on the same
+ * stale reasoning, which meant a player who had been knocked out still read
+ * as alive in lobby_state.
  */
 async function lobbyStateMessage(lobby, lobbyId) {
   const startingMoney = startingMoneyOf(lobby);
   const live = await connectionsInLobby(lobbyId);
+
+  /*
+   * A finished match leaves its state behind so the results screen survives a
+   * reload, but it is not a match in progress — nobody is spectating a game
+   * that is over, and the next start_game reseats everyone from the roster.
+   */
+  const running = await readGameState(lobbyId);
+  const inPlay = running && running.phase !== "gameover" ? running : null;
+  const seatedInMatch = new Map(
+    (inPlay?.players ?? []).map((p) => [p.username, p])
+  );
+  /** a match is running and this person is not in it */
+  const spectates = (username) => Boolean(inPlay) && !seatedInMatch.has(username);
   const byUsername = new Map();
   for (const row of live) {
     if (!row.username) continue; // connected but not yet joined
@@ -45,32 +74,36 @@ async function lobbyStateMessage(lobby, lobbyId) {
     if (seen.has(username)) continue;
     seen.add(username);
     const conn = byUsername.get(username);
+    const inMatch = seatedInMatch.get(username);
     players.push({
       username,
       displayName: conn?.displayName || username,
       avatar: conn?.avatar ?? null,
-      money: Number(seat.points ?? startingMoney),
-      alive: true, // phase is always "lobby" in Phase 0
+      money: inMatch ? Number(inMatch.money ?? 0) : Number(seat.points ?? startingMoney),
+      // the match is the authority while one is running; the roster seat is
+      // only what to show before it starts
+      alive: inMatch ? Boolean(inMatch.alive) : true,
       connected: Boolean(conn),
       isHost: seat.role === "Admin",
       streak: Number(conn?.streak ?? 0),
-      isSpectator: false,
+      isSpectator: spectates(username),
     });
   }
 
   // connected but not on the roster (joined the socket without the REST join)
   for (const [username, conn] of byUsername) {
     if (seen.has(username)) continue;
+    const inMatch = seatedInMatch.get(username);
     players.push({
       username,
       displayName: conn.displayName || username,
       avatar: conn.avatar ?? null,
-      money: startingMoney,
-      alive: true,
+      money: inMatch ? Number(inMatch.money ?? 0) : startingMoney,
+      alive: inMatch ? Boolean(inMatch.alive) : true,
       connected: true,
       isHost: false,
       streak: Number(conn.streak ?? 0),
-      isSpectator: false,
+      isSpectator: spectates(username),
     });
   }
 
