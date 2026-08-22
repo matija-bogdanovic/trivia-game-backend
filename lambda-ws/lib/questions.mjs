@@ -9,7 +9,12 @@
 
 import { ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { ddb } from "./aws.mjs";
-import { MATH_QUESTION_CHANCE, QUESTIONS_TABLE } from "./config.mjs";
+import {
+  DEFAULT_LANGUAGE,
+  MATH_QUESTION_CHANCE,
+  MIN_LANGUAGE_POOL,
+  QUESTIONS_TABLE,
+} from "./config.mjs";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // QUESTIONS — ported from src/server/game/questions.ts
@@ -81,6 +86,11 @@ function normalizeQuestion(raw, fallbackId) {
     options,
     answer,
     difficulty: difficulty >= 1 && difficulty <= 3 ? Math.round(difficulty) : 1,
+    // rows written before the multilingual import have no language; they are
+    // all English, so that is what an absent field means
+    language: typeof raw.language === "string" && raw.language
+      ? raw.language
+      : DEFAULT_LANGUAGE,
   };
 }
 
@@ -88,12 +98,56 @@ function normalizeQuestion(raw, fallbackId) {
 let questionPool = null;
 async function loadQuestionPool() {
   if (questionPool) return questionPool;
-  const res = await ddb.send(new ScanCommand({ TableName: QUESTIONS_TABLE }));
-  const list = (res.Items ?? [])
-    .map((item, i) => normalizeQuestion(item, `db-${i}`))
-    .filter(Boolean);
-  questionPool = { byId: new Map(list.map((q) => [q.id, q])), ids: list.map((q) => q.id) };
+  // the table outgrew a single Scan page with the OpenTDB import — without the
+  // pagination below the pool silently became "whatever fit in the first 1MB"
+  const list = [];
+  let ExclusiveStartKey;
+  do {
+    const res = await ddb.send(
+      new ScanCommand({ TableName: QUESTIONS_TABLE, ExclusiveStartKey })
+    );
+    for (const [i, item] of (res.Items ?? []).entries()) {
+      const q = normalizeQuestion(item, `db-${list.length + i}`);
+      if (q) list.push(q);
+    }
+    ExclusiveStartKey = res.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+
+  const idsByLang = new Map();
+  for (const q of list) {
+    if (!idsByLang.has(q.language)) idsByLang.set(q.language, []);
+    idsByLang.get(q.language).push(q.id);
+  }
+
+  questionPool = {
+    byId: new Map(list.map((q) => [q.id, q])),
+    ids: list.map((q) => q.id),
+    idsByLang,
+  };
   return questionPool;
+}
+
+/**
+ * The ids a match in `language` may draw from, and the fallback rule.
+ *
+ * THE RULE, in order:
+ *   1. that language, if it holds at least MIN_LANGUAGE_POOL questions
+ *   2. otherwise DEFAULT_LANGUAGE ("en"), on the same test
+ *   3. otherwise everything there is
+ *
+ * Falling back rather than serving a thin pool is deliberate. A language with
+ * a dozen questions does not produce a short match, it produces a repetitive
+ * one — the deck reshuffles as soon as it empties, so the same twelve come
+ * round again inside a single game. English at full size is a better game
+ * than Serbian at a tenth of it, and step 3 exists only so a misconfigured
+ * table still deals cards instead of dropping to pure arithmetic.
+ */
+function idsForLanguage(pool, language) {
+  const wanted = pool.idsByLang?.get(language) ?? [];
+  if (wanted.length >= MIN_LANGUAGE_POOL) return wanted;
+  const fallback = pool.idsByLang?.get(DEFAULT_LANGUAGE) ?? [];
+  if (fallback.length >= MIN_LANGUAGE_POOL) return fallback;
+  return pool.ids ?? [];
 }
 
 /**
@@ -104,6 +158,25 @@ async function loadQuestionPool() {
 function drawQuestion(state, difficulty, pool) {
   if (Math.random() < MATH_QUESTION_CHANCE) return generateMathQuestion(difficulty);
   if (!state.deck) state.deck = { fresh: [], used: [] };
+
+  /*
+   * SEED THE DECK. It starts { fresh: [], used: [] } and nothing filled it —
+   * so `fresh` was empty, `used` was empty, the reshuffle below produced
+   * nothing, and every single draw fell through to generateMathQuestion(). The
+   * whole table was unreachable: a match was 100% arithmetic no matter how
+   * many questions had been imported.
+   *
+   * The seed is language-scoped, which is also what makes a match monolingual
+   * — the deck is the only source of table questions, so filtering it filters
+   * everything. `deckLanguage` is stamped alongside so a match whose language
+   * was decided before the deck existed still reshuffles from the right pool.
+   */
+  const language = state.language || DEFAULT_LANGUAGE;
+  if (!state.deck.fresh.length && !state.deck.used.length) {
+    state.deck.fresh = shuffle(idsForLanguage(pool, language));
+    state.deck.deckLanguage = language;
+  }
+
   if (!state.deck.fresh.length) {
     state.deck.fresh = shuffle(state.deck.used);
     state.deck.used = [];
@@ -123,6 +196,7 @@ function drawQuestion(state, difficulty, pool) {
 export {
   drawQuestion,
   generateMathQuestion,
+  idsForLanguage,
   loadQuestionPool,
   normalizeQuestion,
   randInt,

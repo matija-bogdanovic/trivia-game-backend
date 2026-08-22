@@ -87,6 +87,28 @@ const CODE_DUEL_TIME_MS = 90000;
 // ─── scoring constants, also from room.ts ──────────────────────────────────
 /** share of questions that are generated arithmetic rather than deck draws */
 const MATH_QUESTION_CHANCE = 0.3;
+
+/* ── LANGUAGE ──────────────────────────────────────────────────────────────
+ * Every question row carries a `language`. A match draws from ONE of them,
+ * because everyone at the table is shown the same question — so the language
+ * is a property of the match, not of the player reading it.
+ */
+
+/** what a match falls back to, and what an unknown client language becomes */
+const DEFAULT_LANGUAGE = "en";
+
+/** languages the question table is expected to hold */
+const SUPPORTED_LANGUAGES = ["en", "sr"];
+
+/**
+ * Below this many questions, a language is not worth playing in — the deck
+ * would loop back to repeats within a single long match. A language that
+ * thin falls back to DEFAULT_LANGUAGE rather than serving the same twelve
+ * questions over and over.
+ *
+ * 40 is roughly two long matches' worth at this chain depth.
+ */
+const MIN_LANGUAGE_POOL = 40;
 /** what a wrong answer or a timeout costs the answerer */
 const WRONG_ANSWER_COST = 100;
 /** smallest stake, and the floor for being counted as an eligible bettor */
@@ -181,7 +203,10 @@ export {
   GAME_STATE_TABLE,
   LOBBIES_TABLE,
   LOBBY_INDEX,
+  DEFAULT_LANGUAGE,
   MATH_QUESTION_CHANCE,
+  MIN_LANGUAGE_POOL,
+  SUPPORTED_LANGUAGES,
   MAX_PLAYERS,
   MAX_STARTING_MONEY,
   MIN_BET,

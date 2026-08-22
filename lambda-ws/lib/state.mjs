@@ -25,6 +25,8 @@ import {
   sleep,
   startingMoneyOf,
   ttlFrom,
+  DEFAULT_LANGUAGE,
+  SUPPORTED_LANGUAGES,
 } from "./config.mjs";
 import { quotasFor } from "./pot.mjs";
 
@@ -88,6 +90,40 @@ import { quotasFor } from "./pot.mjs";
  * seated — room.ts does the same thing ("only players present at the start
  * participate") by deleting disconnected players in startGame().
  */
+
+/**
+ * The one language this match will be played in.
+ *
+ * Everyone at the table sees the same question, so this cannot be per-player
+ * however much the join message is per-player. The rule is MAJORITY of the
+ * players actually being seated, ties broken toward DEFAULT_LANGUAGE — which
+ * means a mixed table plays in English, the language everyone in a mixed
+ * table is most likely to share, rather than in whichever language happened
+ * to connect first.
+ *
+ * A client that sends nothing, or something outside SUPPORTED_LANGUAGES,
+ * counts as DEFAULT_LANGUAGE rather than being ignored: an old client is an
+ * English client, and that is exactly what it used to get.
+ */
+function matchLanguage(seated, connections) {
+  const votes = new Map();
+  for (const p of seated) {
+    const raw = connections.get(p.username)?.lang;
+    const lang = SUPPORTED_LANGUAGES.includes(raw) ? raw : DEFAULT_LANGUAGE;
+    votes.set(lang, (votes.get(lang) ?? 0) + 1);
+  }
+  let best = DEFAULT_LANGUAGE;
+  let bestCount = 0;
+  for (const [lang, count] of votes) {
+    // strictly greater, so an exact tie leaves the default standing
+    if (count > bestCount) {
+      best = lang;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
 function initialGameState(lobby, lobbyId, connRows) {
   const now = nowMs();
   const live = new Map();
@@ -157,6 +193,13 @@ function initialGameState(lobby, lobbyId, connRows) {
     duel: null,
     currentSpin: null,
     currentPick: null,
+    /*
+     * Decided once, here, and then fixed for the match. Deciding it per draw
+     * would let the language change mid-game as people come and go, which is
+     * a worse experience than any single language would have been.
+     */
+    language: matchLanguage(players, live),
+
     deck: { fresh: [], used: [] },
     chat: [],
 
@@ -173,6 +216,7 @@ function publicGameState(s) {
     version: s.version,
     matchId: s.matchId,
     phase: s.phase,
+    language: s.language ?? "en",
     phaseEndsAt: s.phaseEndsAt,
     round: s.round,
     chainDepth: s.chainDepth,

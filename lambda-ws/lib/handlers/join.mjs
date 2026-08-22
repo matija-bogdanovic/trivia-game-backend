@@ -10,7 +10,12 @@
 import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { identityFromToken, scryptVerify } from "../auth.mjs";
 import { ddb } from "../aws.mjs";
-import { CONNECTIONS_TABLE, capacityOf } from "../config.mjs";
+import {
+  CONNECTIONS_TABLE,
+  DEFAULT_LANGUAGE,
+  SUPPORTED_LANGUAGES,
+  capacityOf,
+} from "../config.mjs";
 import { postTo, ttlFromNow } from "../connections.mjs";
 import { resolveLobby, walletProfile } from "../lobbies.mjs";
 import { phaseMessage, systemChat } from "../messages.mjs";
@@ -112,7 +117,7 @@ async function onJoin(event, connectionId, msg, row) {
       Key: { connectionId },
       UpdateExpression:
         "SET #username = :u, #displayName = :d, #lobbyId = :l, #avatar = :a, " +
-        "#streak = :s, #joinedAt = :j, #expiresAt = :e",
+        "#streak = :s, #joinedAt = :j, #expiresAt = :e, #lang = :lang",
       ExpressionAttributeNames: {
         "#username": "username",
         "#displayName": "displayName",
@@ -121,6 +126,7 @@ async function onJoin(event, connectionId, msg, row) {
         "#streak": "streak",
         "#joinedAt": "joinedAt",
         "#expiresAt": "expiresAt",
+        "#lang": "lang",
       },
       ExpressionAttributeValues: {
         ":u": username,
@@ -132,6 +138,16 @@ async function onJoin(event, connectionId, msg, row) {
         ":s": profile.streak,
         ":j": row?.joinedAt ?? Date.now(),
         ":e": ttlFromNow(),
+        /*
+         * The client's current i18n language, which is what start_game counts
+         * to pick the match language. Validated against the supported list
+         * rather than trusted: this is client-supplied, and an unknown value
+         * must land on the default instead of creating a language nobody has
+         * questions for.
+         */
+        ":lang": SUPPORTED_LANGUAGES.includes(String(msg.lang ?? ""))
+          ? String(msg.lang)
+          : DEFAULT_LANGUAGE,
       },
     })
   );
