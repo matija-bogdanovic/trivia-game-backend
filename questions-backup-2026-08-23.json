@@ -1,0 +1,2190 @@
+{
+  "_backup": {
+    "table": "Questions",
+    "region": "eu-west-3",
+    "takenAt": "2026-08-23T01:35:24.253849",
+    "count": 64,
+    "format": "DynamoDB AttributeValue JSON — restore with batch-write-item",
+    "lastEvaluatedKey": null
+  },
+  "Items": [
+    {
+      "question_text": {
+        "S": "Which classic book opens with the line \"Call me Ishmael\"?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "A Tale of Two Cities"
+          },
+          {
+            "S": "Moby Dick"
+          },
+          {
+            "S": "Wuthering Heights"
+          },
+          {
+            "S": "Kidnapped"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Books"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-31"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "1"
+      },
+      "answer": {
+        "S": "Moby Dick"
+      }
+    },
+    {
+      "question_text": {
+        "S": "Who patented a steam engine that produced continuous rotary motion?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Alessandro Volta"
+          },
+          {
+            "S": "Albert Einstein"
+          },
+          {
+            "S": "Nikola Tesla"
+          },
+          {
+            "S": "James Watt"
+          }
+        ]
+      },
+      "category": {
+        "S": "Science: Gadgets"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-34"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "James Watt"
+      }
+    },
+    {
+      "question_text": {
+        "S": "Who wrote the novel 'Fear And Loathing In Las Vegas'?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "William S. Burroughs"
+          },
+          {
+            "S": "Hunter S. Thompson"
+          },
+          {
+            "S": "F. Scott Fitzgerald"
+          },
+          {
+            "S": "Henry Miller"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Books"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-29"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "1"
+      },
+      "answer": {
+        "S": "Hunter S. Thompson"
+      }
+    },
+    {
+      "question_text": {
+        "S": "In Night In The Woods, where does Gregg work?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Snack Falcon"
+          },
+          {
+            "S": "Ol' Pickaxe"
+          },
+          {
+            "S": "Video Outpost \"Too\""
+          },
+          {
+            "S": "Food Donkey"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Video Games"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-0"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "1"
+      },
+      "answer": {
+        "S": "Snack Falcon"
+      }
+    },
+    {
+      "question_text": {
+        "S": "Who is the horror manga artist who made Uzumaki?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Junji Ito"
+          },
+          {
+            "S": "Kazuo Umezu"
+          },
+          {
+            "S": "Sui Ishida"
+          },
+          {
+            "S": "Shintaro Kago"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Japanese Anime & Manga"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-33"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "3"
+      },
+      "answer": {
+        "S": "Junji Ito"
+      }
+    },
+    {
+      "question_text": {
+        "S": "Who is the author of Jurassic Park?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Irvine Welsh"
+          },
+          {
+            "S": "Chuck Paluhniuk"
+          },
+          {
+            "S": "Peter Benchley"
+          },
+          {
+            "S": "Michael Crichton"
+          }
+        ]
+      },
+      "category": {
+        "S": "General Knowledge"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-14"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "1"
+      },
+      "answer": {
+        "S": "Michael Crichton"
+      }
+    },
+    {
+      "question_id": {
+        "S": "2"
+      },
+      "question_text": {
+        "S": "У ком веку је пао Константинопољ под османску власт?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "XII век"
+          },
+          {
+            "S": "XIII век"
+          },
+          {
+            "S": "XIV век"
+          },
+          {
+            "S": "XV век"
+          }
+        ]
+      },
+      "answer": {
+        "S": "XV век"
+      }
+    },
+    {
+      "question_text": {
+        "S": "What was the major distinction between the English and French Gothic styles of architecture?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Fan vaulting"
+          },
+          {
+            "S": "Hemispherical Domes"
+          },
+          {
+            "S": "Pinnacles"
+          },
+          {
+            "S": "Gargoyles"
+          }
+        ]
+      },
+      "category": {
+        "S": "Art"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-18"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "3"
+      },
+      "answer": {
+        "S": "Fan vaulting"
+      }
+    },
+    {
+      "question_id": {
+        "S": "13"
+      },
+      "question_text": {
+        "S": "Које године је основано римско царство?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "27 године п.н.е."
+          },
+          {
+            "S": "5 године н.е."
+          },
+          {
+            "S": "20 године п.н.е."
+          },
+          {
+            "S": "10 године п.н.е."
+          }
+        ]
+      },
+      "answer": {
+        "S": "27 године п.н.е."
+      }
+    },
+    {
+      "question_text": {
+        "S": "In \"A Certain Magical Index,\" what is Accelerator able to control?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Quantums"
+          },
+          {
+            "S": "Wormholes"
+          },
+          {
+            "S": "Vectors"
+          },
+          {
+            "S": "Velocity"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Japanese Anime & Manga"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-23"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "Vectors"
+      }
+    },
+    {
+      "question_text": {
+        "S": "Which of the following blood component forms a plug at the site of injuries?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Platelets"
+          },
+          {
+            "S": "Blood plasma"
+          },
+          {
+            "S": "Red blood cells"
+          },
+          {
+            "S": "White blood cells"
+          }
+        ]
+      },
+      "category": {
+        "S": "General Knowledge"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-38"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "1"
+      },
+      "answer": {
+        "S": "Platelets"
+      }
+    },
+    {
+      "question_text": {
+        "S": "Which former US president was nicknamed \"Teddy\" after he refused to shoot a defenseless black bear?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Andrew Jackson"
+          },
+          {
+            "S": "James F. Fielder"
+          },
+          {
+            "S": "Woodrow Wilson"
+          },
+          {
+            "S": "Theodore Roosevelt"
+          }
+        ]
+      },
+      "category": {
+        "S": "Politics"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-42"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "1"
+      },
+      "answer": {
+        "S": "Theodore Roosevelt"
+      }
+    },
+    {
+      "question_text": {
+        "S": "What is the capital of Laos?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Vientiane"
+          },
+          {
+            "S": "Tegucigalpa"
+          },
+          {
+            "S": "Tarawa"
+          },
+          {
+            "S": "Vaduz"
+          }
+        ]
+      },
+      "category": {
+        "S": "Geography"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-24"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "Vientiane"
+      }
+    },
+    {
+      "question_text": {
+        "S": "What ingredient is NOT used to craft a cake in Minecraft?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Milk"
+          },
+          {
+            "S": "Wheat"
+          },
+          {
+            "S": "Bread"
+          },
+          {
+            "S": "Egg"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Video Games"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-48"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "1"
+      },
+      "answer": {
+        "S": "Bread"
+      }
+    },
+    {
+      "question_id": {
+        "S": "8"
+      },
+      "question_text": {
+        "S": "Која река је најдужа на свету?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Амазон"
+          },
+          {
+            "S": "Нил"
+          },
+          {
+            "S": "Мисисипи"
+          },
+          {
+            "S": "Јангце"
+          }
+        ]
+      },
+      "answer": {
+        "S": "Нил"
+      }
+    },
+    {
+      "question_text": {
+        "S": "Which of the following is a major muscle of the back?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Triquetrum"
+          },
+          {
+            "S": "Trapezoid"
+          },
+          {
+            "S": "Trapezium"
+          },
+          {
+            "S": "Trapezius"
+          }
+        ]
+      },
+      "category": {
+        "S": "Science & Nature"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-47"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "3"
+      },
+      "answer": {
+        "S": "Trapezius"
+      }
+    },
+    {
+      "question_id": {
+        "S": "9"
+      },
+      "question_text": {
+        "S": "Усамљене стенске формације, најчешће виђене у \"Monument Valley\", називају се?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Hoodoos"
+          },
+          {
+            "S": "Buttes"
+          },
+          {
+            "S": "Mesa"
+          },
+          {
+            "S": "Fjords"
+          }
+        ]
+      },
+      "answer": {
+        "S": "Buttes"
+      }
+    },
+    {
+      "question_text": {
+        "S": "According to Overwatch's lore, who was once a member of the Deadlock Gang?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Junkrat"
+          },
+          {
+            "S": "Soldier 76"
+          },
+          {
+            "S": "Roadhog"
+          },
+          {
+            "S": "McCree"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Video Games"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-44"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "McCree"
+      }
+    },
+    {
+      "question_text": {
+        "S": "In which one of these cities did the Great Stink of 1858 occur?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Moscow"
+          },
+          {
+            "S": "New York"
+          },
+          {
+            "S": "Berlin"
+          },
+          {
+            "S": "London"
+          }
+        ]
+      },
+      "category": {
+        "S": "History"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-40"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "London"
+      }
+    },
+    {
+      "question_text": {
+        "S": "Who painted The Starry Night?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Michelangelo"
+          },
+          {
+            "S": "Leonardo da Vinci"
+          },
+          {
+            "S": "Pablo Picasso"
+          },
+          {
+            "S": "Vincent van Gogh"
+          }
+        ]
+      },
+      "category": {
+        "S": "Art"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-43"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "1"
+      },
+      "answer": {
+        "S": "Vincent van Gogh"
+      }
+    },
+    {
+      "question_id": {
+        "S": "1"
+      },
+      "question_text": {
+        "S": "Који је византијски цар позвао Словене да се населе на Балканском полуострву како би га бранили од Авара и других упада?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Јустинијан I"
+          },
+          {
+            "S": "Хераклије"
+          },
+          {
+            "S": "Константин V"
+          },
+          {
+            "S": "Базилије II"
+          }
+        ]
+      },
+      "answer": {
+        "S": "Базилије II"
+      }
+    },
+    {
+      "question_text": {
+        "S": "In Fallout 4, which type of power armor is first encountered in the early mission \"When Freedom Calls\" in a crashed Vertibird?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "T-45"
+          },
+          {
+            "S": "T-51"
+          },
+          {
+            "S": "T-60"
+          },
+          {
+            "S": "X-01"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Video Games"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-1"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "T-45"
+      }
+    },
+    {
+      "question_id": {
+        "S": "6"
+      },
+      "question_text": {
+        "S": "Које године је серија \"Бела лађа\" кренула са емитовањем?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "2000"
+          },
+          {
+            "S": "1999"
+          },
+          {
+            "S": "2004"
+          },
+          {
+            "S": "2006"
+          }
+        ]
+      },
+      "answer": {
+        "S": "2006"
+      }
+    },
+    {
+      "question_text": {
+        "S": "During the Wars of the Roses (1455 - 1487) which Englishman was dubbed \"the Kingmaker\"?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Richard III"
+          },
+          {
+            "S": "Richard Neville"
+          },
+          {
+            "S": "Henry V"
+          },
+          {
+            "S": "Thomas Warwick"
+          }
+        ]
+      },
+      "category": {
+        "S": "History"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-26"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "3"
+      },
+      "answer": {
+        "S": "Richard Neville"
+      }
+    },
+    {
+      "question_text": {
+        "S": "Which of these is NOT considered a woodwind instrument?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Bassoon"
+          },
+          {
+            "S": "Clarinet"
+          },
+          {
+            "S": "Oboe"
+          },
+          {
+            "S": "Trombone"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Music"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-10"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "1"
+      },
+      "answer": {
+        "S": "Trombone"
+      }
+    },
+    {
+      "question_text": {
+        "S": "Which of the following superheros did Wonder Woman NOT have a love interest in?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Superman"
+          },
+          {
+            "S": "Steve Trevor"
+          },
+          {
+            "S": "Batman"
+          },
+          {
+            "S": "Green Arrow"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Comics"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-22"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "Green Arrow"
+      }
+    },
+    {
+      "question_text": {
+        "S": "When was the website reddit founded ?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "2004"
+          },
+          {
+            "S": "2005"
+          },
+          {
+            "S": "2006"
+          },
+          {
+            "S": "2008"
+          }
+        ]
+      },
+      "category": {
+        "S": "General Knowledge"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-6"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "1"
+      },
+      "answer": {
+        "S": "2005"
+      }
+    },
+    {
+      "question_text": {
+        "S": "What is the name of the 2016 mixtape released by Venezuelan electronic producer Arca?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "&&&&&&"
+          },
+          {
+            "S": "Entrañas"
+          },
+          {
+            "S": "Xen"
+          },
+          {
+            "S": "Sheep"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Music"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-5"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "3"
+      },
+      "answer": {
+        "S": "Entrañas"
+      }
+    },
+    {
+      "question_text": {
+        "S": "Who is frozen at the end of the movie \"Goldeneye\"?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Alec Travelyan"
+          },
+          {
+            "S": "Boris Grishenko"
+          },
+          {
+            "S": "James Bond"
+          },
+          {
+            "S": "Natalya Simonova"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Film"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-28"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "1"
+      },
+      "answer": {
+        "S": "Boris Grishenko"
+      }
+    },
+    {
+      "question_text": {
+        "S": "In \"PAYDAY 2\", what weapon has the highest base weapon damage on a per-shot basis?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "HRL-7"
+          },
+          {
+            "S": "Heavy Crossbow"
+          },
+          {
+            "S": "Broomstick Pistol"
+          },
+          {
+            "S": "Thanatos .50 cal"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Video Games"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-49"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "HRL-7"
+      }
+    },
+    {
+      "question_text": {
+        "S": "How much does the 'AWP' cost in Counter-Strike: Global Offensive?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "$4750"
+          },
+          {
+            "S": "$4500"
+          },
+          {
+            "S": "$4650"
+          },
+          {
+            "S": "$5000"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Video Games"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-15"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "$4750"
+      }
+    },
+    {
+      "question_text": {
+        "S": "Which country has the most Trappist breweries?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "France"
+          },
+          {
+            "S": "USA"
+          },
+          {
+            "S": "Netherlands"
+          },
+          {
+            "S": "Belgium"
+          }
+        ]
+      },
+      "category": {
+        "S": "General Knowledge"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-21"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "Belgium"
+      }
+    },
+    {
+      "question_text": {
+        "S": "What is the average lifespan of a domestic rabbit?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "4-7 years"
+          },
+          {
+            "S": "14-20 years"
+          },
+          {
+            "S": "1-2 years"
+          },
+          {
+            "S": "8-12 years"
+          }
+        ]
+      },
+      "category": {
+        "S": "Animals"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-8"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "8-12 years"
+      }
+    },
+    {
+      "question_text": {
+        "S": "Which of the following is not a character in the Street Fighter series?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Ibuki"
+          },
+          {
+            "S": "Sakura Kasugano"
+          },
+          {
+            "S": "Laura Matsuda"
+          },
+          {
+            "S": "Mai Shiranui"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Video Games"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-9"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "1"
+      },
+      "answer": {
+        "S": "Mai Shiranui"
+      }
+    },
+    {
+      "question_text": {
+        "S": "In what year did Microsoft release the original Xbox console in North America?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "2003"
+          },
+          {
+            "S": "1996"
+          },
+          {
+            "S": "1998"
+          },
+          {
+            "S": "2001"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Video Games"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-7"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "2001"
+      }
+    },
+    {
+      "question_text": {
+        "S": "Akatsuki's subclass in \"Log Horizon\" is what?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": " Tracker"
+          },
+          {
+            "S": "Assassin"
+          },
+          {
+            "S": "Scribe"
+          },
+          {
+            "S": "Apprentice"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Japanese Anime & Manga"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-36"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "3"
+      },
+      "answer": {
+        "S": " Tracker"
+      }
+    },
+    {
+      "question_text": {
+        "S": "Which of following is rude and dishonorable by Klingon standards?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Reaching over and taking his meal"
+          },
+          {
+            "S": "Taking his D'k tahg"
+          },
+          {
+            "S": "Punching him and taking his ship station position"
+          },
+          {
+            "S": "Insulting and laughing at him at the dinner table"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Television"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-27"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "Taking his D'k tahg"
+      }
+    },
+    {
+      "question_text": {
+        "S": "Which of the following is the longest river in Europe?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Volga"
+          },
+          {
+            "S": "Danube"
+          },
+          {
+            "S": "Dnieper"
+          },
+          {
+            "S": "Ural"
+          }
+        ]
+      },
+      "category": {
+        "S": "Geography"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-4"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "Volga"
+      }
+    },
+    {
+      "question_id": {
+        "S": "5"
+      },
+      "question_text": {
+        "S": "Које године је рођен Наполеон Бонапарта?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "1820"
+          },
+          {
+            "S": "1693"
+          },
+          {
+            "S": "1752"
+          },
+          {
+            "S": "1769"
+          }
+        ]
+      },
+      "answer": {
+        "S": "1769"
+      }
+    },
+    {
+      "question_text": {
+        "S": "In what year did the First World War end?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "1912"
+          },
+          {
+            "S": "1916"
+          },
+          {
+            "S": "1914"
+          },
+          {
+            "S": "1918"
+          }
+        ]
+      },
+      "category": {
+        "S": "History"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-39"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "1918"
+      }
+    },
+    {
+      "question_id": {
+        "S": "4"
+      },
+      "question_text": {
+        "S": "Ко је написао књигу \"Писма Милени\"?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Франц Кафка"
+          },
+          {
+            "S": "Алберт Ками"
+          },
+          {
+            "S": "Фридрих Ниче"
+          },
+          {
+            "S": "Томас Ман"
+          }
+        ]
+      },
+      "answer": {
+        "S": "Франц Кафка"
+      }
+    },
+    {
+      "question_text": {
+        "S": "What is the standard SI unit for distance?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Metre"
+          },
+          {
+            "S": "Angstrom"
+          },
+          {
+            "S": "Foot"
+          },
+          {
+            "S": "Fathom"
+          }
+        ]
+      },
+      "category": {
+        "S": "Science & Nature"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-30"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "1"
+      },
+      "answer": {
+        "S": "Metre"
+      }
+    },
+    {
+      "question_text": {
+        "S": "What is the name of the three headed dog in Harry Potter and the Sorcerer's Stone?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Spot"
+          },
+          {
+            "S": "Fluffy"
+          },
+          {
+            "S": "Poofy"
+          },
+          {
+            "S": "Spike"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Books"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-45"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "1"
+      },
+      "answer": {
+        "S": "Fluffy"
+      }
+    },
+    {
+      "question_text": {
+        "S": "Which of the following Arab countries does NOT have a flag containing only Pan-Arab colours?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "United Arab Emirates"
+          },
+          {
+            "S": "Jordan"
+          },
+          {
+            "S": "Kuwait"
+          },
+          {
+            "S": "Qatar"
+          }
+        ]
+      },
+      "category": {
+        "S": "Geography"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-12"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "1"
+      },
+      "answer": {
+        "S": "Qatar"
+      }
+    },
+    {
+      "question_text": {
+        "S": "In DC comics where does the Green Arrow (Oliver Queen) live?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Star City"
+          },
+          {
+            "S": "Central City"
+          },
+          {
+            "S": "Metropolis"
+          },
+          {
+            "S": "Gotham City"
+          }
+        ]
+      },
+      "category": {
+        "S": "General Knowledge"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-35"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "1"
+      },
+      "answer": {
+        "S": "Star City"
+      }
+    },
+    {
+      "question_text": {
+        "S": "In the 1968 Cartoon Show \"Wacky Races\" what was the name of cavemen duo who rode in The Boulder Mobile?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "The Stone Brothers"
+          },
+          {
+            "S": "The Slate Brothers"
+          },
+          {
+            "S": "The Slag Brothers"
+          },
+          {
+            "S": "The Rock Brothers"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Cartoon & Animations"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-17"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "3"
+      },
+      "answer": {
+        "S": "The Slag Brothers"
+      }
+    },
+    {
+      "question_id": {
+        "S": "7"
+      },
+      "question_text": {
+        "S": "Када се одиграла Косовска битка?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "1390"
+          },
+          {
+            "S": "1450"
+          },
+          {
+            "S": "1389"
+          },
+          {
+            "S": "1301"
+          }
+        ]
+      },
+      "answer": {
+        "S": "1389"
+      }
+    },
+    {
+      "question_id": {
+        "S": "11"
+      },
+      "question_text": {
+        "S": "Колико дуго су Срби били под турском влашћу?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Око 150 година"
+          },
+          {
+            "S": "Око 350 година"
+          },
+          {
+            "S": "Око 500 година"
+          },
+          {
+            "S": "Око 700 година"
+          }
+        ]
+      },
+      "answer": {
+        "S": "Око 350 година"
+      }
+    },
+    {
+      "question_text": {
+        "S": "How many stars are there to collect in Super Mario 64?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "100"
+          },
+          {
+            "S": "120"
+          },
+          {
+            "S": "60"
+          },
+          {
+            "S": "80"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Video Games"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-16"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "120"
+      }
+    },
+    {
+      "question_id": {
+        "S": "3"
+      },
+      "question_text": {
+        "S": "Ко је освојио титулу Ролан Гароса у 2011 години?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Рафаел Надал"
+          },
+          {
+            "S": "Новак Ђоковић"
+          },
+          {
+            "S": "Роџер Федерер"
+          },
+          {
+            "S": "Енди Мареј"
+          }
+        ]
+      },
+      "answer": {
+        "S": "Рафаел Надал"
+      }
+    },
+    {
+      "question_text": {
+        "S": "What is the real name of prominent electronic musician Aphex Twin?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Richard D. James"
+          },
+          {
+            "S": "Richard M. Hall"
+          },
+          {
+            "S": "Richard H. Blackmore"
+          },
+          {
+            "S": "Richard W. Wright"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Music"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-37"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "Richard D. James"
+      }
+    },
+    {
+      "question_text": {
+        "S": "In \"A Certain Scientific Railgun\", how many \"sisters\" did Accelerator have to kill to achieve the rumored level 6?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "20,000"
+          },
+          {
+            "S": "128"
+          },
+          {
+            "S": "10,000"
+          },
+          {
+            "S": "5,000"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Japanese Anime & Manga"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-46"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "1"
+      },
+      "answer": {
+        "S": "20,000"
+      }
+    },
+    {
+      "question_text": {
+        "S": "What country is Sean Matsuda from in Street Fighter?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Japan"
+          },
+          {
+            "S": "UK"
+          },
+          {
+            "S": "Brazil"
+          },
+          {
+            "S": "USA"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Video Games"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-19"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "Brazil"
+      }
+    },
+    {
+      "question_id": {
+        "S": "12"
+      },
+      "question_text": {
+        "S": "Кумане се налази у?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Бачкој"
+          },
+          {
+            "S": "Банату"
+          },
+          {
+            "S": "Срему"
+          },
+          {
+            "S": "Шумадији"
+          }
+        ]
+      },
+      "answer": {
+        "S": "Банату"
+      }
+    },
+    {
+      "question_id": {
+        "S": "10"
+      },
+      "question_text": {
+        "S": "Између које две земље се налази највиши планински врх, Монт Еверест? "
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Непала и Индије"
+          },
+          {
+            "S": "Русије и Кине"
+          },
+          {
+            "S": "Непала и Кине"
+          },
+          {
+            "S": "Кине и Монголије"
+          }
+        ]
+      },
+      "answer": {
+        "S": "Непала и Кине"
+      }
+    },
+    {
+      "question_text": {
+        "S": "What island in the Canary Islands was the scene of one of the worst air disasters in history with the collision of two jumbo jets?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Maui"
+          },
+          {
+            "S": "Tenerife"
+          },
+          {
+            "S": "Fuerteventura"
+          },
+          {
+            "S": "Gran Canaria"
+          }
+        ]
+      },
+      "category": {
+        "S": "Geography"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-3"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "Tenerife"
+      }
+    },
+    {
+      "question_text": {
+        "S": "What was the world's first video game?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Spacewar!"
+          },
+          {
+            "S": "Space Travel"
+          },
+          {
+            "S": "Draughts"
+          },
+          {
+            "S": "Pong"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Video Games"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-2"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "3"
+      },
+      "answer": {
+        "S": "Draughts"
+      }
+    },
+    {
+      "question_text": {
+        "S": "In \"Call Of Duty: Zombies\", \"Richtofen\" is in possession of two filled blood vials belonging to who?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Richtofen"
+          },
+          {
+            "S": "Al Arlington and Sal DeLuca"
+          },
+          {
+            "S": "Sal DeLuca and Finn O'Leary"
+          },
+          {
+            "S": "Jessica Rose and Jack Vincent"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Video Games"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-13"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "3"
+      },
+      "answer": {
+        "S": "Sal DeLuca and Finn O'Leary"
+      }
+    },
+    {
+      "question_text": {
+        "S": "In the video game \"Metal Gear Solid\", what did Revolver Ocelot consider the greatest handgun ever made?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Colt 1851 Navy Revolver"
+          },
+          {
+            "S": "Colt Python"
+          },
+          {
+            "S": "Colt Single Action Army"
+          },
+          {
+            "S": "Colt M1892"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Video Games"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-32"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "3"
+      },
+      "answer": {
+        "S": "Colt Single Action Army"
+      }
+    },
+    {
+      "question_text": {
+        "S": "Which character class in Dungeons and Dragons 5th edition gains it's powers from making a pact with a being of higher power?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Cleric"
+          },
+          {
+            "S": "Sorceror"
+          },
+          {
+            "S": "Wizard"
+          },
+          {
+            "S": "Warlock"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Board Games"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-25"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "3"
+      },
+      "answer": {
+        "S": "Warlock"
+      }
+    },
+    {
+      "question_id": {
+        "S": "14"
+      },
+      "question_text": {
+        "S": "Како се звао торањ Николе Тесле у Њујорку?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Си-Ен Торањ"
+          },
+          {
+            "S": "Варденклифски Торањ"
+          },
+          {
+            "S": "Ајфелов Торањ"
+          },
+          {
+            "S": "Торањ Монтжуик"
+          }
+        ]
+      },
+      "answer": {
+        "S": "Варденклифски Торањ"
+      }
+    },
+    {
+      "question_text": {
+        "S": "What is the alphanumeric representation of the imaginary number?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "i"
+          },
+          {
+            "S": "x"
+          },
+          {
+            "S": "e"
+          },
+          {
+            "S": "n"
+          }
+        ]
+      },
+      "category": {
+        "S": "Science: Mathematics"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-11"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "i"
+      }
+    },
+    {
+      "question_text": {
+        "S": "From what show is the character \"James Doakes\"? "
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "Marvel's Daredevil"
+          },
+          {
+            "S": "Dexter"
+          },
+          {
+            "S": "Boardwalk Empire"
+          },
+          {
+            "S": "The Walking Dead"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Television"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-20"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "Dexter"
+      }
+    },
+    {
+      "question_text": {
+        "S": "How long was Ken Jennings' win streak on Jeopardy?"
+      },
+      "question_options": {
+        "L": [
+          {
+            "S": "74"
+          },
+          {
+            "S": "88"
+          },
+          {
+            "S": "62"
+          },
+          {
+            "S": "49"
+          }
+        ]
+      },
+      "category": {
+        "S": "Entertainment: Television"
+      },
+      "question_id": {
+        "S": "otdb-1785102329680-41"
+      },
+      "source": {
+        "S": "opentdb"
+      },
+      "difficulty": {
+        "N": "2"
+      },
+      "answer": {
+        "S": "74"
+      }
+    }
+  ]
+}

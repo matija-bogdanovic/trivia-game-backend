@@ -1,0 +1,203 @@
+{
+  "_note": "The 14 hand-written Serbian questions, lifted out of the pre-rebuild backup and tagged language=sr. These are re-inserted verbatim after the OpenTDB repopulation; they are the only non-English content and the only questions written for this game.",
+  "takenAt": "2026-08-23T01:36:17.337406",
+  "count": 14,
+  "questions": [
+    {
+      "question_id": "2",
+      "question_text": "У ком веку је пао Константинопољ под османску власт?",
+      "question_options": [
+        "XII век",
+        "XIII век",
+        "XIV век",
+        "XV век"
+      ],
+      "answer": "XV век",
+      "language": "sr",
+      "source": "handwritten",
+      "difficulty": 1
+    },
+    {
+      "question_id": "13",
+      "question_text": "Које године је основано римско царство?",
+      "question_options": [
+        "27 године п.н.е.",
+        "5 године н.е.",
+        "20 године п.н.е.",
+        "10 године п.н.е."
+      ],
+      "answer": "27 године п.н.е.",
+      "language": "sr",
+      "source": "handwritten",
+      "difficulty": 1
+    },
+    {
+      "question_id": "8",
+      "question_text": "Која река је најдужа на свету?",
+      "question_options": [
+        "Амазон",
+        "Нил",
+        "Мисисипи",
+        "Јангце"
+      ],
+      "answer": "Нил",
+      "language": "sr",
+      "source": "handwritten",
+      "difficulty": 1
+    },
+    {
+      "question_id": "9",
+      "question_text": "Усамљене стенске формације, најчешће виђене у \"Monument Valley\", називају се?",
+      "question_options": [
+        "Hoodoos",
+        "Buttes",
+        "Mesa",
+        "Fjords"
+      ],
+      "answer": "Buttes",
+      "language": "sr",
+      "source": "handwritten",
+      "difficulty": 1
+    },
+    {
+      "question_id": "1",
+      "question_text": "Који је византијски цар позвао Словене да се населе на Балканском полуострву како би га бранили од Авара и других упада?",
+      "question_options": [
+        "Јустинијан I",
+        "Хераклије",
+        "Константин V",
+        "Базилије II"
+      ],
+      "answer": "Базилије II",
+      "language": "sr",
+      "source": "handwritten",
+      "difficulty": 1
+    },
+    {
+      "question_id": "6",
+      "question_text": "Које године је серија \"Бела лађа\" кренула са емитовањем?",
+      "question_options": [
+        "2000",
+        "1999",
+        "2004",
+        "2006"
+      ],
+      "answer": "2006",
+      "language": "sr",
+      "source": "handwritten",
+      "difficulty": 1
+    },
+    {
+      "question_id": "5",
+      "question_text": "Које године је рођен Наполеон Бонапарта?",
+      "question_options": [
+        "1820",
+        "1693",
+        "1752",
+        "1769"
+      ],
+      "answer": "1769",
+      "language": "sr",
+      "source": "handwritten",
+      "difficulty": 1
+    },
+    {
+      "question_id": "4",
+      "question_text": "Ко је написао књигу \"Писма Милени\"?",
+      "question_options": [
+        "Франц Кафка",
+        "Алберт Ками",
+        "Фридрих Ниче",
+        "Томас Ман"
+      ],
+      "answer": "Франц Кафка",
+      "language": "sr",
+      "source": "handwritten",
+      "difficulty": 1
+    },
+    {
+      "question_id": "7",
+      "question_text": "Када се одиграла Косовска битка?",
+      "question_options": [
+        "1390",
+        "1450",
+        "1389",
+        "1301"
+      ],
+      "answer": "1389",
+      "language": "sr",
+      "source": "handwritten",
+      "difficulty": 1
+    },
+    {
+      "question_id": "11",
+      "question_text": "Колико дуго су Срби били под турском влашћу?",
+      "question_options": [
+        "Око 150 година",
+        "Око 350 година",
+        "Око 500 година",
+        "Око 700 година"
+      ],
+      "answer": "Око 350 година",
+      "language": "sr",
+      "source": "handwritten",
+      "difficulty": 1
+    },
+    {
+      "question_id": "3",
+      "question_text": "Ко је освојио титулу Ролан Гароса у 2011 години?",
+      "question_options": [
+        "Рафаел Надал",
+        "Новак Ђоковић",
+        "Роџер Федерер",
+        "Енди Мареј"
+      ],
+      "answer": "Рафаел Надал",
+      "language": "sr",
+      "source": "handwritten",
+      "difficulty": 1
+    },
+    {
+      "question_id": "12",
+      "question_text": "Кумане се налази у?",
+      "question_options": [
+        "Бачкој",
+        "Банату",
+        "Срему",
+        "Шумадији"
+      ],
+      "answer": "Банату",
+      "language": "sr",
+      "source": "handwritten",
+      "difficulty": 1
+    },
+    {
+      "question_id": "10",
+      "question_text": "Између које две земље се налази највиши планински врх, Монт Еверест? ",
+      "question_options": [
+        "Непала и Индије",
+        "Русије и Кине",
+        "Непала и Кине",
+        "Кине и Монголије"
+      ],
+      "answer": "Непала и Кине",
+      "language": "sr",
+      "source": "handwritten",
+      "difficulty": 1
+    },
+    {
+      "question_id": "14",
+      "question_text": "Како се звао торањ Николе Тесле у Њујорку?",
+      "question_options": [
+        "Си-Ен Торањ",
+        "Варденклифски Торањ",
+        "Ајфелов Торањ",
+        "Торањ Монтжуик"
+      ],
+      "answer": "Варденклифски Торањ",
+      "language": "sr",
+      "source": "handwritten",
+      "difficulty": 1
+    }
+  ]
+}
