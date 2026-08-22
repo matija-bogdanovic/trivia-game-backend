@@ -62,8 +62,12 @@
  *                            createdAt }],
  *               outgoing: [{ username, displayName,
  *                            status: "pending" | "denied",
- *                            createdAt, updatedAt }]
+ *                            createdAt, updatedAt, retryAt }]
  *             }
+ *
+ *   `retryAt` is epoch ms — when a denied person may be asked again, from the
+ *   cooldown friendsAction enforces. null on a pending row, and on a denial
+ *   old enough to have expired.
  *
  *   `requests` is what was sent TO me and `outgoing` is what I sent — the two
  *   halves of pending, so both sides of a request can see it. A denied
@@ -100,6 +104,15 @@ import {
 const REGION = process.env.AWS_REGION || "eu-west-3";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? "http://localhost:3000";
 const PLAYERS_TABLE = process.env.PLAYERS_TABLE || "Players";
+
+/*
+ * Mirrors of the cooldown rule in friendsAction.mjs — this route only reports
+ * when a denial expires, it never enforces anything. Keep the two in step;
+ * friendsAction is the authority and the only place a request is refused.
+ */
+const DENY_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
+const DENY_COOLDOWN_REPEAT_MS = 30 * 24 * 60 * 60 * 1000;
+const DENY_ESCALATE_AFTER = 2;
 
 // clients at module scope so warm invocations reuse the connections
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
@@ -262,6 +275,7 @@ function freshWallet(username) {
     friendRequests: [],
     outgoingRequests: [],
     deniedRequests: [],
+    requestLog: [],
     avatar: null,
     displayName: null,
   };
@@ -280,6 +294,7 @@ function withDefaults(w) {
   w.friendRequests ??= [];
   w.outgoingRequests ??= [];
   w.deniedRequests ??= [];
+  w.requestLog ??= [];
   w.avatar ??= null;
   w.displayName ??= null;
   return w;
@@ -397,19 +412,39 @@ export const handler = async (event) => {
           status: "pending",
           createdAt: null,
           updatedAt: null,
+          retryAt: null,
         })),
-        ...(me.deniedRequests ?? []).map(async (entry) => {
-          const name = typeof entry === "string" ? entry : entry?.username;
-          if (!name) return null;
-          const at = typeof entry?.at === "number" ? entry.at : null;
-          return {
-            username: name,
-            displayName: (await nameOf(name)).displayName,
-            status: "denied",
-            createdAt: null,
-            updatedAt: at,
-          };
-        }),
+        /*
+         * A name can be in BOTH lists: the ledger entry survives a
+         * re-request, because the denial count is what escalates the
+         * cooldown. Pending is the live state and wins — the denial behind it
+         * is history, not something to show twice.
+         */
+        ...(me.deniedRequests ?? [])
+          .filter((entry) => {
+            const name = typeof entry === "string" ? entry : entry?.username;
+            return name && !(me.outgoingRequests ?? []).includes(name);
+          })
+          .map(async (entry) => {
+            const name = typeof entry === "string" ? entry : entry?.username;
+            const at = typeof entry?.at === "number" ? entry.at : null;
+            const count = Number(entry?.count ?? 1);
+            // the same rule friendsAction enforces, mirrored so the screen can
+            // say WHEN rather than only that it was refused
+            const cooldown =
+              count >= DENY_ESCALATE_AFTER
+                ? DENY_COOLDOWN_REPEAT_MS
+                : DENY_COOLDOWN_MS;
+            return {
+              username: name,
+              displayName: (await nameOf(name)).displayName,
+              status: "denied",
+              createdAt: null,
+              updatedAt: at,
+              /** epoch ms this person may be asked again; null = right now */
+              retryAt: at ? at + cooldown : null,
+            };
+          }),
       ]),
     ]);
 

@@ -181,6 +181,7 @@ function seed(...names) {
       friendRequests: [],
       outgoingRequests: [],
       deniedRequests: [],
+      requestLog: [],
     });
   }
 }
@@ -218,17 +219,18 @@ check('denial kept on sender', deniedNames('ana'), ['bob']);
 check('denial is stamped', typeof get('ana').deniedRequests[0].at, 'number');
 check('not friends', get('ana').friends, []);
 
-console.log('\n── re-request after a denial clears it ──');
-check('status', await engine.sendFriendRequest('ana', 'bob'), 'pending');
-check('denial cleared', deniedNames('ana'), []);
-check('pending again', get('bob').friendRequests, ['ana']);
+// an immediate re-request after a denial is now refused, and the ledger
+// survives to escalate — both covered in the ANTI-SPAM section below
 
 console.log('\n── cancel: sender withdraws ──');
+seed('ana', 'bob');
+await engine.sendFriendRequest('ana', 'bob');
 check('status', await engine.cancelFriendRequest('ana', 'bob'), 'cancelled');
 check('outgoing cleared', get('ana').outgoingRequests, []);
 check('incoming cleared', get('bob').friendRequests, []);
 check('cancel with nothing pending', await engine.cancelFriendRequest('ana', 'bob'), 'No such request');
-check('no denial invented', deniedNames('ana'), []);
+check('cancelling is not a denial', deniedNames('ana'), []);
+check('a cancel does not start a cooldown', await engine.sendFriendRequest('ana', 'bob'), 'pending');
 
 console.log('\n── reverse case: both sent, second becomes an accept ──');
 seed('ana', 'bob');
@@ -251,6 +253,89 @@ await engine.acceptFriendRequest('bob', 'ana');
 check('status', await engine.removeFriend('ana', 'bob'), 'removed');
 check('ana friends', get('ana').friends, []);
 check('bob friends', get('bob').friends, []);
+
+console.log('\n── ANTI-SPAM: a denial starts a cooldown ──');
+seed('ana', 'bob');
+await engine.sendFriendRequest('ana', 'bob');
+await engine.declineFriendRequest('bob', 'ana');
+check('re-request is refused', await engine.sendFriendRequest('ana', 'bob'), 'Request recently denied');
+check('NO pending row was created', get('bob').friendRequests, []);
+check('NO outgoing row was created', get('ana').outgoingRequests, []);
+check('denial count is 1', get('ana').deniedRequests[0].count, 1);
+
+console.log('\n── the cooldown expires (7d) ──');
+const DAY = 24 * 60 * 60 * 1000;
+const ledger = get('ana');
+ledger.deniedRequests[0].at = Date.now() - 8 * DAY;
+table.set('ana', ledger);
+check('allowed after 8 days', await engine.sendFriendRequest('ana', 'bob'), 'pending');
+check('pending row created', get('bob').friendRequests, ['ana']);
+check('ledger SURVIVES the re-request', deniedNames('ana'), ['bob']);
+check('count still 1', get('ana').deniedRequests[0].count, 1);
+
+console.log('\n── a second denial escalates 7d → 30d ──');
+await engine.declineFriendRequest('bob', 'ana');
+check('count is 2', get('ana').deniedRequests[0].count, 2);
+const l2 = get('ana');
+l2.deniedRequests[0].at = Date.now() - 8 * DAY;
+table.set('ana', l2);
+check('8 days is no longer enough', await engine.sendFriendRequest('ana', 'bob'), 'Request recently denied');
+const l3 = get('ana');
+l3.deniedRequests[0].at = Date.now() - 31 * DAY;
+table.set('ana', l3);
+check('31 days is', await engine.sendFriendRequest('ana', 'bob'), 'pending');
+
+console.log('\n── accepting clears the refusal history ──');
+await engine.acceptFriendRequest('bob', 'ana');
+check('ledger cleared', deniedNames('ana'), []);
+
+console.log('\n── ANTI-SPAM: the outstanding cap (50) ──');
+seed('spammer');
+for (let i = 0; i < 60; i++) table.set(`t${i}`, { username: `t${i}`, friends: [], friendRequests: [], outgoingRequests: [], deniedRequests: [], requestLog: [] });
+// the hourly limit would bite first, so exercise the cap on its own
+let capHit = null;
+for (let i = 0; i < 60 && !capHit; i++) {
+  const me = get('spammer');
+  me.requestLog = []; // isolate: this test is about the outstanding cap
+  table.set('spammer', me);
+  const r = await engine.sendFriendRequest('spammer', `t${i}`);
+  if (r !== 'pending') capHit = { i, r };
+}
+check('refused once outstanding', capHit?.r, 'Too many pending requests');
+check('at exactly 50 pending', capHit?.i, 50);
+check('outgoing stopped at the cap', get('spammer').outgoingRequests.length, 50);
+
+console.log('\n── ANTI-SPAM: the hourly rate (20) ──');
+seed('flood');
+for (let i = 0; i < 30; i++) table.set(`u${i}`, { username: `u${i}`, friends: [], friendRequests: [], outgoingRequests: [], deniedRequests: [], requestLog: [] });
+let rateHit = null;
+for (let i = 0; i < 30 && !rateHit; i++) {
+  const r = await engine.sendFriendRequest('flood', `u${i}`);
+  if (r !== 'pending') rateHit = { i, r };
+}
+check('refused once too fast', rateHit?.r, 'Sending too fast');
+check('at exactly 20 in the hour', rateHit?.i, 20);
+check('log did not grow past the cap', get('flood').requestLog.length <= 40, true);
+
+console.log('\n── the rate window slides ──');
+const flood = get('flood');
+flood.requestLog = flood.requestLog.map((t) => t - 2 * 60 * 60 * 1000); // 2h ago
+table.set('flood', flood);
+check('allowed again an hour later', await engine.sendFriendRequest('flood', 'u25'), 'pending');
+check('stale timestamps pruned', get('flood').requestLog.length, 1);
+
+console.log('\n── the limits do not block ANSWERING ──');
+seed('busy', 'caller');
+const busy = get('busy');
+busy.outgoingRequests = Array.from({ length: 60 }, (_, i) => `x${i}`);
+busy.requestLog = Array.from({ length: 40 }, () => Date.now());
+busy.friendRequests = ['caller'];
+table.set('busy', busy);
+const caller = get('caller');
+caller.outgoingRequests = ['busy'];
+table.set('caller', caller);
+check('accept still works over the caps', await engine.acceptFriendRequest('busy', 'caller'), 'accepted');
+check('they are friends', get('busy').friends, ['caller']);
 
 console.log('\n── conditional write: a lost race is retried, not clobbered ──');
 seed('ana', 'bob', 'cy');

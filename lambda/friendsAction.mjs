@@ -62,7 +62,14 @@
  *             400 { message: "target and action required" | "Unknown action" |
  *                            "That's you" | "User not found" | "Already friends" |
  *                            "Request already sent" | "No such request" |
+ *                            "Request recently denied" |        ← cooldown
+ *                            "Too many pending requests" |      ← outstanding cap
+ *                            "Sending too fast" |               ← hourly rate
  *                            "Please try again" }
+ *
+ *   The last three are the anti-spam rules; see the ANTI-SPAM block below for
+ *   the numbers. A refusal from any of them writes NOTHING — no pending row
+ *   and no notification reaches the target.
  *
  *   The status is the STATE the friendship is now in, not the verb used —
  *   "pending" where this once said "sent", "denied" where it said "declined".
@@ -266,6 +273,7 @@ function freshWallet(username) {
     friendRequests: [],
     outgoingRequests: [],
     deniedRequests: [],
+    requestLog: [],
     avatar: null,
     displayName: null,
   };
@@ -284,6 +292,7 @@ function withDefaults(w) {
   w.friendRequests ??= [];
   w.outgoingRequests ??= [];
   w.deniedRequests ??= [];
+  w.requestLog ??= [];
   w.avatar ??= null;
   w.displayName ??= null;
   return w;
@@ -389,6 +398,52 @@ const MAX_ATTEMPTS = 3;
  */
 const DENIED_LIMIT = 50;
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * ANTI-SPAM — every number worth arguing about, in one place
+ * ═══════════════════════════════════════════════════════════════════════════
+ * All of it is enforced HERE and nowhere else. The client shows the reasons
+ * but cannot supply them: the acting username comes from the verified token,
+ * the counters live on the server's copy of the record, and a caller who
+ * skips the UI entirely meets exactly the same refusals.
+ *
+ * The two halves answer different abuses. The COOLDOWN stops one person being
+ * asked over and over by someone they already turned down — it is per-pair
+ * and keyed off the denial the recipient made. The RATE LIMITS stop one
+ * account papering a hundred strangers at once — they are per-sender and
+ * blind to who the target is. Neither subsumes the other.
+ */
+
+/** after a denial, how long before that person may be asked again */
+const DENY_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+/** the same, once someone has turned you down repeatedly */
+const DENY_COOLDOWN_REPEAT_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+/**
+ * Denials by the same person needed before the longer cooldown applies.
+ * At 2, a first "no" costs a week and a second costs a month — the escalation
+ * lands on the person who ignored the first answer, and nobody else.
+ */
+const DENY_ESCALATE_AFTER = 2;
+
+/**
+ * How many requests may be outstanding at once. This is the cap that actually
+ * bites a mass-add: pending requests are only cleared by the RECIPIENT
+ * answering, so a spammer cannot free up room by waiting.
+ */
+const MAX_PENDING_OUTGOING = 50;
+
+/** the short window, and how many sends are allowed inside it */
+const SEND_RATE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const SEND_RATE_MAX = 20;
+
+/**
+ * Timestamps kept for the rate check. Only the window matters, so the log is
+ * pruned to it on every send; the cap is a floor under a clock that jumps
+ * backwards, not a tuning knob.
+ */
+const REQUEST_LOG_LIMIT = SEND_RATE_MAX * 2;
+
 /**
  * One item's half of a transition: the attributes to set, and the values they
  * must still hold for the write to be allowed.
@@ -485,7 +540,41 @@ const without = (list, username) =>
 const withOne = (list, username) =>
   (list ?? []).includes(username) ? [...list] : [...(list ?? []), username];
 const withoutDenied = (list, username) =>
-  (list ?? []).filter((d) => (typeof d === "string" ? d : d?.username) !== username);
+  (list ?? []).filter((d) => deniedName(d) !== username);
+
+/** tolerant of the pre-cooldown shape, where an entry was a bare username */
+const deniedName = (entry) =>
+  typeof entry === "string" ? entry : (entry?.username ?? null);
+
+const findDenial = (list, username) =>
+  (list ?? []).find((d) => deniedName(d) === username) ?? null;
+
+/**
+ * How long this particular person's denial locks the sender out.
+ *
+ * `count` is how many times they have said no. One refusal is a week; a
+ * second — someone asking again after already being told once — is a month.
+ */
+function cooldownFor(denial) {
+  const count = Number(denial?.count ?? 1);
+  return count >= DENY_ESCALATE_AFTER
+    ? DENY_COOLDOWN_REPEAT_MS
+    : DENY_COOLDOWN_MS;
+}
+
+/** epoch ms when this denial stops blocking, or 0 when it never did */
+function retryAtFor(denial) {
+  const at = Number(denial?.at ?? 0);
+  if (!at) return 0;
+  return at + cooldownFor(denial);
+}
+
+/** the send log, pruned to the window and to a sane length */
+function recentSends(log, now) {
+  return (log ?? [])
+    .filter((t) => typeof t === "number" && now - t < SEND_RATE_WINDOW_MS)
+    .slice(-REQUEST_LOG_LIMIT);
+}
 
 /** returns "accepted", or an error string */
 async function acceptFriendRequest(username, from) {
@@ -501,6 +590,8 @@ async function acceptFriendRequest(username, from) {
         },
         [from]: {
           outgoingRequests: without(other.outgoingRequests, username),
+          // accepted: the refusal history stops mattering, and keeping it
+          // would hold a cooldown over a friendship that already exists
           deniedRequests: withoutDenied(other.deniedRequests, username),
           friends: withOne(other.friends, username),
         },
@@ -512,14 +603,27 @@ async function acceptFriendRequest(username, from) {
 /**
  * returns "pending"/"accepted", or an error string
  *
- * RE-REQUEST POLICY: a previously denied request may be sent again, and doing
- * so clears the denial. That is deliberate — a denial is not a block, and
- * making it permanent is a product decision rather than a storage one. The
- * `at` stamp on the cleared entry is what a cooldown would key off; this is
- * the one place that rule would go.
+ * THE THREE REFUSALS THAT ARE NOT ABOUT THIS REQUEST — the anti-spam rules.
+ * They are checked before anything is written, so a blocked send leaves NO
+ * trace: no pending row, no notification, nothing on the target's record. The
+ * point of a cooldown is that the person who said no does not hear from you
+ * again, and creating the row and then hiding it would defeat it.
+ *
+ * Order matters. The per-pair cooldown is checked first, because "that person
+ * turned you down" is a truer reason than "you have sent a lot lately" when
+ * both apply, and it is the one the sender can do something about.
+ *
+ * RE-REQUEST POLICY: a denial may be sent again once its cooldown has run —
+ * a week, or a month if that person has turned you down twice. The ledger
+ * entry SURVIVES the re-request rather than being cleared, which is what
+ * makes the escalation possible: clearing it would reset the count and let a
+ * denial-then-wait loop run forever at the shorter interval. It is cleared
+ * only when the friendship is actually accepted, where the history stops
+ * mattering.
  */
 async function sendFriendRequest(from, to) {
   if (from === to) return "That's you";
+  const now = Date.now();
   return commitPair(from, to, (me, target) => {
     if (!target) return "User not found";
     if ((me.friends ?? []).includes(to)) return "Already friends";
@@ -542,12 +646,31 @@ async function sendFriendRequest(from, to) {
       };
     }
     if ((target.friendRequests ?? []).includes(from)) return "Request already sent";
+
+    /* ── anti-spam, in the order a sender can act on ────────────────────── */
+
+    // 1. did this person already turn you down, and is that still recent?
+    const denial = findDenial(me.deniedRequests, to);
+    const retryAt = retryAtFor(denial);
+    if (retryAt > now) return "Request recently denied";
+
+    // 2. how many are already outstanding? Only the recipient clears these,
+    //    so a spammer cannot wait their way back under the cap
+    if ((me.outgoingRequests ?? []).length >= MAX_PENDING_OUTGOING) {
+      return "Too many pending requests";
+    }
+
+    // 3. how many have gone out in the last hour, answered or not
+    const sends = recentSends(me.requestLog, now);
+    if (sends.length >= SEND_RATE_MAX) return "Sending too fast";
+
     return {
       status: "pending",
       changes: {
         [from]: {
           outgoingRequests: withOne(me.outgoingRequests, to),
-          deniedRequests: withoutDenied(me.deniedRequests, to),
+          // the ledger is deliberately NOT cleared here — see the note above
+          requestLog: [...sends, now],
         },
         [to]: { friendRequests: withOne(target.friendRequests, from) },
       },
@@ -562,14 +685,27 @@ async function declineFriendRequest(username, from) {
     const changes = {
       [username]: { friendRequests: without(me.friendRequests, from) },
     };
-    // the denial is recorded on the SENDER, because they are the one who has
-    // to be told. A sender whose account is gone simply has nowhere to record it
+    /*
+     * The denial is recorded on the SENDER — they are the one who has to be
+     * told, and the one the cooldown is enforced against when they try again.
+     * A sender whose account is gone has nowhere to record it.
+     *
+     * `count` carries across the rewrite, so a second refusal from the same
+     * person reads as a second and earns the longer cooldown. The entry is
+     * moved to the end of the list as it is rewritten, which is what makes
+     * DENIED_LIMIT drop the stalest denial rather than the most recent one.
+     */
     if (other) {
+      const previous = findDenial(other.deniedRequests, username);
       changes[from] = {
         outgoingRequests: without(other.outgoingRequests, username),
         deniedRequests: [
           ...withoutDenied(other.deniedRequests, username),
-          { username, at: Date.now() },
+          {
+            username,
+            at: Date.now(),
+            count: Number(previous?.count ?? 0) + 1,
+          },
         ].slice(-DENIED_LIMIT),
       };
     }
