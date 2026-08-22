@@ -5,3 +5,6 @@
 /lambda/node_modules
 # build artefact: the deploy zip, rebuilt by the command in lambda/README.md
 ipakseokrece-lambda.zip
+
+# transient copy used by scripts/match_results_test.mjs
+lambda-ws/lib/.results.undertest.mjs

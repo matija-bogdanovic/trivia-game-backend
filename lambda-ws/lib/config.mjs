@@ -26,6 +26,32 @@ const WS_ENDPOINT =
 const LOBBY_INDEX = process.env.CONNECTIONS_LOBBY_INDEX || "lobby-index";
 const LOBBIES_TABLE = process.env.LOBBIES_TABLE || "Lobbies";
 const PLAYERS_TABLE = process.env.PLAYERS_TABLE || "Players";
+const MATCHES_TABLE = process.env.MATCHES_TABLE || "Matches";
+
+/* ── MATCH RESULTS ─────────────────────────────────────────────────────────
+ * The rewards a finished match pays out. Ported verbatim from the legacy
+ * Express server's game/wallet.ts so a match scored there and a match scored
+ * here are worth the same — the two must not disagree about what a win is.
+ */
+const COINS_PER_GAME = 25;
+const COINS_PER_WIN = 100;
+const POINTS_PER_WIN = 25;
+/** extra points per consecutive win, on top of POINTS_PER_WIN */
+const POINTS_STREAK_BONUS = 5;
+const POINTS_STREAK_BONUS_CAP = 50;
+
+/**
+ * How many finished matches a player carries inside their own record.
+ *
+ * The Players item is read whole by POST /wallet and rewritten whole by other
+ * routes, and DynamoDB caps an item at 400KB — so the embedded history is a
+ * WINDOW, not an archive. The archive is the Matches table, one item per
+ * match, which is why the summary here can stay small without losing anything.
+ */
+const MATCH_HISTORY_LIMIT = 20;
+
+/** only used to seed a record that a match reaches before POST /wallet does */
+const CREDIT_CAP = 5;
 const CONNECTION_TTL_SECONDS = Number(process.env.CONNECTION_TTL_SECONDS || 7200);
 // ─── game constants (mirrors src/server/game/room.ts) ──────────────────────
 const MIN_PLAYERS = 2;
@@ -257,7 +283,15 @@ export {
   STARTING_MONEY,
   STATE_MAX_ATTEMPTS,
   STATE_TTL_SECONDS,
+  COINS_PER_GAME,
+  COINS_PER_WIN,
+  CREDIT_CAP,
+  MATCHES_TABLE,
+  MATCH_HISTORY_LIMIT,
   PLAYERS_TABLE,
+  POINTS_PER_WIN,
+  POINTS_STREAK_BONUS,
+  POINTS_STREAK_BONUS_CAP,
   WRONG_ANSWER_COST,
   WS_ENDPOINT,
   capacityOf,

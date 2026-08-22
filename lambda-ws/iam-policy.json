@@ -10,7 +10,10 @@
     {
       "Sid": "CloudWatchLogStreams",
       "Effect": "Allow",
-      "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
       "Resource": "arn:aws:logs:eu-west-3:637423486388:log-group:/aws/lambda/*:*"
     },
     {
@@ -56,7 +59,10 @@
     {
       "Sid": "PhaseTimerStateMachine",
       "Effect": "Allow",
-      "Action": ["states:StartExecution", "states:StopExecution"],
+      "Action": [
+        "states:StartExecution",
+        "states:StopExecution"
+      ],
       "Resource": [
         "arn:aws:states:eu-west-3:637423486388:stateMachine:ipakSeOkrecePhaseTimer",
         "arn:aws:states:eu-west-3:637423486388:execution:ipakSeOkrecePhaseTimer:*"
@@ -65,7 +71,11 @@
     {
       "Sid": "LobbiesTableReadCloseAndKick",
       "Effect": "Allow",
-      "Action": ["dynamodb:GetItem", "dynamodb:DeleteItem", "dynamodb:UpdateItem"],
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:UpdateItem"
+      ],
       "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Lobbies"
     },
     {
@@ -75,10 +85,21 @@
       "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Lobbies/index/code-index"
     },
     {
-      "Sid": "PlayersProfileRead",
+      "Sid": "PlayersProfileReadAndResultWrite",
       "Effect": "Allow",
-      "Action": "dynamodb:GetItem",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:UpdateItem"
+      ],
       "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Players"
+    },
+    {
+      "Sid": "MatchesArchiveWrite",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:PutItem"
+      ],
+      "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Matches"
     }
   ]
 }

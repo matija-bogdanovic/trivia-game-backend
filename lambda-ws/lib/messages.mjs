@@ -10,6 +10,7 @@
 import { MIN_BET, nowMs } from "./config.mjs";
 import { broadcast } from "./connections.mjs";
 import { quotasFor } from "./pot.mjs";
+import { persistMatchResults } from "./results.mjs";
 import { publicGameState } from "./state.mjs";
 
 /** the phase-specific message that rides alongside game_state */
@@ -161,11 +162,24 @@ function phaseMessage(state) {
   }
 }
 
-/** state first so the client can render off it, then the phase event */
+/**
+ * state first so the client can render off it, then the phase event
+ *
+ * And, when that phase is `gameover`, the match is recorded — this is the one
+ * place EVERY phase transition passes through, from the timer, from the last
+ * answer, and from a player leaving. Hooking it here rather than at the five
+ * call sites is what makes it impossible to add a sixth path to gameover that
+ * silently forgets to pay anybody.
+ *
+ * Recording happens AFTER the broadcast, on purpose: the results screen should
+ * not wait on bookkeeping. persistMatchResults is idempotent and never throws,
+ * so a repeated call or a failed write cannot disturb a finished match.
+ */
 async function broadcastPhase(event, lobbyId, state) {
   await broadcastGameState(event, lobbyId, state);
   const msg = phaseMessage(state);
   if (msg) await broadcast(event, lobbyId, msg);
+  if (state?.phase === "gameover") await persistMatchResults(event, state);
 }
 /** push the current state to everyone in the lobby */
 async function broadcastGameState(event, lobbyId, state) {
