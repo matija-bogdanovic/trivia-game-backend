@@ -20,7 +20,8 @@
  *   this role deliberately holds no cognito-idp permission.
  *
  * ── ORDER, AND WHY ─────────────────────────────────────────────────────────
- *   1. scrub the caller out of other players' friends/friendRequests
+ *   1. scrub the caller out of other players' friends / friendRequests /
+ *      outgoingRequests / deniedRequests
  *   2. delete Players/{username}
  *   3. delete the Cognito user  ← last
  *   The data goes before the identity. If step 3 fails the caller still has a
@@ -263,20 +264,37 @@ async function scrubFriendReferences(username) {
     );
     for (const item of page.Items ?? []) {
       if (!item?.username || item.username === username) continue;
+      /*
+       * All four friendship arrays, because a deleted account has to vanish
+       * from every state a friendship can be in — not just the accepted and
+       * incoming ones. `outgoingRequests` and `deniedRequests` were added
+       * with the pending/denied model; `sentRequests` was a name that never
+       * existed on any record and is gone with it.
+       *
+       * deniedRequests holds objects ({ username, at }), so it filters on the
+       * field rather than the element — the string form is tolerated in case
+       * a record predates the object one.
+       */
       const friends = Array.isArray(item.friends) ? item.friends : [];
       const requests = Array.isArray(item.friendRequests) ? item.friendRequests : [];
-      const sent = Array.isArray(item.sentRequests) ? item.sentRequests : [];
+      const outgoing = Array.isArray(item.outgoingRequests) ? item.outgoingRequests : [];
+      const denied = Array.isArray(item.deniedRequests) ? item.deniedRequests : [];
       const nextFriends = friends.filter((u) => u !== username);
       const nextRequests = requests.filter((u) => u !== username);
-      const nextSent = sent.filter((u) => u !== username);
+      const nextOutgoing = outgoing.filter((u) => u !== username);
+      const nextDenied = denied.filter(
+        (d) => (typeof d === "string" ? d : d?.username) !== username
+      );
       const touched =
         nextFriends.length !== friends.length ||
         nextRequests.length !== requests.length ||
-        nextSent.length !== sent.length;
+        nextOutgoing.length !== outgoing.length ||
+        nextDenied.length !== denied.length;
       if (!touched) continue;
       item.friends = nextFriends;
       item.friendRequests = nextRequests;
-      if (Array.isArray(item.sentRequests)) item.sentRequests = nextSent;
+      if (Array.isArray(item.outgoingRequests)) item.outgoingRequests = nextOutgoing;
+      if (Array.isArray(item.deniedRequests)) item.deniedRequests = nextDenied;
       await ddb.send(new PutCommand({ TableName: PLAYERS_TABLE, Item: item }));
       scrubbed++;
     }

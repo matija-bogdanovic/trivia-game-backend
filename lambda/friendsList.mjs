@@ -53,10 +53,26 @@
  *   Either leave it off (recommended), or turn it on and set ALLOWED_ORIGIN
  *   to an empty string here.
  *
- * ── CONTRACT (matches the Express route exactly — do not change) ───────────
+ * ── CONTRACT ───────────────────────────────────────────────────────────────
  *   Request:  POST /friends/list   (no body)
- *   Response: 200 { friends: [{ username, displayName, online, points,
- *                               currentStreak, wins }], requests: [username] }
+ *   Response: 200 {
+ *               friends:  [{ username, displayName, online, points,
+ *                            currentStreak, wins }],
+ *               requests: [{ username, displayName, status: "pending",
+ *                            createdAt }],
+ *               outgoing: [{ username, displayName,
+ *                            status: "pending" | "denied",
+ *                            createdAt, updatedAt }]
+ *             }
+ *
+ *   `requests` is what was sent TO me and `outgoing` is what I sent — the two
+ *   halves of pending, so both sides of a request can see it. A denied
+ *   request stays in `outgoing` with status "denied" rather than vanishing,
+ *   which is what makes "they said no" different from "you never asked".
+ *
+ *   ⚠ `requests` used to be an array of bare username STRINGS. It is objects
+ *   now. The client reads both forms (helpers/friends.ts), so the two can be
+ *   deployed in either order.
  *   Auth:     Authorization: Bearer <Cognito ACCESS token>
  *             401 { message: "Authentication required" } when absent/invalid.
  *             The username comes from the verified token, NEVER from the
@@ -244,6 +260,8 @@ function freshWallet(username) {
     achievements: [],
     friends: [],
     friendRequests: [],
+    outgoingRequests: [],
+    deniedRequests: [],
     avatar: null,
     displayName: null,
   };
@@ -260,6 +278,8 @@ function withDefaults(w) {
   w.achievements ??= [];
   w.friends ??= [];
   w.friendRequests ??= [];
+  w.outgoingRequests ??= [];
+  w.deniedRequests ??= [];
   w.avatar ??= null;
   w.displayName ??= null;
   return w;
@@ -327,25 +347,85 @@ export const handler = async (event) => {
 
   try {
     const me = await getWallet(username);
-    const friends = await Promise.all(
-      me.friends.map(async (name) => {
-        const w = await getWalletIfExists(name);
-        return {
+
+    /*
+     * One read per name, and a name can appear in only one of the three
+     * lists, so nobody is fetched twice. The lookup is for displayName: the
+     * arrays store usernames, and a username is not what anyone should be
+     * shown when the player has chosen a name.
+     */
+    const nameOf = async (name) => {
+      const w = await getWalletIfExists(name);
+      return { w, displayName: w?.displayName ?? name };
+    };
+
+    const [friends, incoming, outgoing] = await Promise.all([
+      Promise.all(
+        (me.friends ?? []).map(async (name) => {
+          const { w, displayName } = await nameOf(name);
+          return {
+            username: name,
+            displayName,
+            // ⚠ always false in Lambda — see the DEGRADED note in the header
+            online: false,
+            points: w?.points ?? 0,
+            currentStreak: w?.currentStreak ?? 0,
+            wins: w?.wins ?? 0,
+          };
+        })
+      ),
+      // requests sent TO me, awaiting my answer
+      Promise.all(
+        (me.friendRequests ?? []).map(async (name) => ({
           username: name,
-          displayName: w?.displayName ?? name,
-          // ⚠ always false in Lambda — see the DEGRADED note in the header
-          online: false,
-          points: w?.points ?? 0,
-          currentStreak: w?.currentStreak ?? 0,
-          wins: w?.wins ?? 0,
-        };
-      })
-    );
+          displayName: (await nameOf(name)).displayName,
+          status: "pending",
+          // the pending arrays hold bare usernames; only a denial is stamped
+          createdAt: null,
+        }))
+      ),
+      /*
+       * My own half: what I have asked for and not yet been answered on, and
+       * what was turned down. Both belong here because both are things only I
+       * can see about myself — the recipient's copy of a pending request is
+       * their `friendRequests`, and a denial is recorded on the sender alone.
+       */
+      Promise.all([
+        ...(me.outgoingRequests ?? []).map(async (name) => ({
+          username: name,
+          displayName: (await nameOf(name)).displayName,
+          status: "pending",
+          createdAt: null,
+          updatedAt: null,
+        })),
+        ...(me.deniedRequests ?? []).map(async (entry) => {
+          const name = typeof entry === "string" ? entry : entry?.username;
+          if (!name) return null;
+          const at = typeof entry?.at === "number" ? entry.at : null;
+          return {
+            username: name,
+            displayName: (await nameOf(name)).displayName,
+            status: "denied",
+            createdAt: null,
+            updatedAt: at,
+          };
+        }),
+      ]),
+    ]);
+
     return json(event, 200, {
       friends: friends.sort(
         (a, b) => Number(b.online) - Number(a.online) || b.points - a.points
       ),
-      requests: me.friendRequests,
+      requests: incoming,
+      // pending first, then the denials, newest denial first
+      outgoing: outgoing
+        .filter(Boolean)
+        .sort(
+          (a, b) =>
+            Number(a.status === "denied") - Number(b.status === "denied") ||
+            (b.updatedAt ?? 0) - (a.updatedAt ?? 0)
+        ),
     });
   } catch (err) {
     console.error("friends list error:", err);

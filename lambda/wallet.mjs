@@ -249,6 +249,8 @@ function freshWallet(username) {
     achievements: [],
     friends: [],
     friendRequests: [],
+    outgoingRequests: [],
+    deniedRequests: [],
     avatar: null,
     displayName: null,
   };
@@ -265,6 +267,8 @@ function withDefaults(w) {
   w.achievements ??= [];
   w.friends ??= [];
   w.friendRequests ??= [];
+  w.outgoingRequests ??= [];
+  w.deniedRequests ??= [];
   w.avatar ??= null;
   w.displayName ??= null;
   return w;

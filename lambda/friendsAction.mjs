@@ -53,20 +53,33 @@
  *   Either leave it off (recommended), or turn it on and set ALLOWED_ORIGIN
  *   to an empty string here.
  *
- * ── CONTRACT (matches the Express route exactly — do not change) ───────────
+ * ── CONTRACT ───────────────────────────────────────────────────────────────
  *   Request:  POST /friends/action
  *             { "target": "<username>",
- *               "action": "request" | "accept" | "decline" | "remove" }
- *   Response: 200 { status: "sent" | "accepted" | "declined" | "removed" }
+ *               "action": "request" | "accept" | "decline" | "cancel" | "remove" }
+ *   Response: 200 { status: "pending" | "accepted" | "denied" | "cancelled"
+ *                         | "removed" }
  *             400 { message: "target and action required" | "Unknown action" |
  *                            "That's you" | "User not found" | "Already friends" |
- *                            "Request already sent" | "No such request" }
+ *                            "Request already sent" | "No such request" |
+ *                            "Please try again" }
+ *
+ *   The status is the STATE the friendship is now in, not the verb used —
+ *   "pending" where this once said "sent", "denied" where it said "declined".
+ *   `request` may legitimately answer "accepted": if the target had already
+ *   asked, the request is taken as accepting theirs.
+ *   `cancel` is the sender withdrawing their own pending request.
  *   Auth:     Authorization: Bearer <Cognito ACCESS token>
  *             401 { message: "Authentication required" } when absent/invalid.
  *             The username comes from the verified token, NEVER from the
  *             body, so a client cannot act as another player.
  *
- * Ported from: friendActionHandler in economy.ts + the friends section of game/wallet.ts
+ * IAM: needs dynamodb:UpdateItem on table/Players in addition to GetItem —
+ * the writes are a TransactWriteItems of two conditional updates now, not a
+ * PutItem of the whole record. The shared role already grants both.
+ *
+ * Ported from: friendActionHandler in economy.ts + the friends section of
+ * game/wallet.ts, then rewritten for the three-state model.
  * ===========================================================================
  */
 
@@ -75,7 +88,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   GetCommand,
-  PutCommand,
+  TransactWriteCommand,
 } from "@aws-sdk/lib-dynamodb";
 
 // ─── config ────────────────────────────────────────────────────────────────
@@ -251,6 +264,8 @@ function freshWallet(username) {
     achievements: [],
     friends: [],
     friendRequests: [],
+    outgoingRequests: [],
+    deniedRequests: [],
     avatar: null,
     displayName: null,
   };
@@ -267,6 +282,8 @@ function withDefaults(w) {
   w.achievements ??= [];
   w.friends ??= [];
   w.friendRequests ??= [];
+  w.outgoingRequests ??= [];
+  w.deniedRequests ??= [];
   w.avatar ??= null;
   w.displayName ??= null;
   return w;
@@ -290,11 +307,6 @@ function refill(wallet) {
   return wallet;
 }
 
-function msUntilNextCredit(wallet) {
-  if (wallet.credits >= CREDIT_CAP) return null;
-  return Math.max(0, wallet.lastRefillAt + CREDIT_REFILL_MS - Date.now());
-}
-
 async function getWallet(username) {
   const res = await ddb.send(
     new GetCommand({ TableName: PLAYERS_TABLE, Key: { username } })
@@ -315,54 +327,277 @@ async function getWalletIfExists(username) {
   return wallet;
 }
 
-async function saveWallet(wallet) {
-  await ddb.send(new PutCommand({ TableName: PLAYERS_TABLE, Item: wallet }));
+/*
+ * There is deliberately no saveWallet() here any more. Writing the whole
+ * record back is what made a friend action able to clobber coins and credits
+ * from a stale read; every write in this file is now a conditional update of
+ * the friendship attributes alone. See commitPair().
+ */
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════════
+ * THE FRIENDSHIP MODEL
+ * ═══════════════════════════════════════════════════════════════════════════
+ * A friendship has three states — pending, accepted, denied — and all three
+ * are represented on BOTH players' records, so either side can see what the
+ * other did. Four arrays on the `Players` item carry it, each one read from
+ * the point of view of the player whose item it is:
+ *
+ *   friends:          string[]            accepted, mirrored on both
+ *   friendRequests:   string[]            PENDING, incoming — who asked me
+ *   outgoingRequests: string[]            PENDING, outgoing — who I asked
+ *   deniedRequests:   [{ username, at }]  DENIED — requests I sent that were
+ *                                         turned down, kept rather than
+ *                                         deleted so "denied" is
+ *                                         distinguishable from "never sent"
+ *
+ * A pending request writes to two items at once (mine and theirs) and so does
+ * every answer to one. `friendRequests` and `outgoingRequests` are the two
+ * halves of the same fact and must never disagree — which is why every
+ * transition below goes through commitPair().
+ *
+ * ── WHY THE ARRAYS ARE STILL STRINGS ───────────────────────────────────────
+ * Bare usernames, not objects with timestamps. accountDelete.mjs scrubs these
+ * arrays by value and POST /wallet hands them to the client as they are, so
+ * changing the element type is a change to readers this file does not own.
+ * `deniedRequests` is a new array nobody else reads, so it carries the `at`
+ * stamp — and it is the only one where a timestamp is actually needed, for
+ * the re-request policy noted in sendFriendRequest().
+ *
+ * ── CONCURRENCY ────────────────────────────────────────────────────────────
+ * These used to be read-modify-PutItem of the WHOLE player record. Two
+ * overlapping calls lost one of the two writes, and worse, a friend action
+ * rewrote coins, credits and match history from a snapshot that could be
+ * seconds stale — so accepting a request could roll back a game reward.
+ *
+ * Now: one TransactWriteItems, updating ONLY the friendship attributes on the
+ * two items, each guarded by a ConditionExpression asserting the attribute is
+ * still exactly what was read. Nothing else on the record is touched, and a
+ * concurrent change to either side aborts the whole transaction rather than
+ * half-applying it. ConditionalCheckFailed is retried from a fresh read.
+ */
+
+/** how many times a transition re-reads and retries after losing a race */
+const MAX_ATTEMPTS = 3;
+
+/**
+ * How many denials a player carries. The record is rewritten whole by other
+ * routes and DynamoDB caps an item at 400KB, so no array on it may grow
+ * without a bound — the same reason matchHistory has MATCH_HISTORY_LIMIT.
+ * Oldest denials fall off first; they are the least likely to be re-requested
+ * and the least useful to a cooldown.
+ */
+const DENIED_LIMIT = 50;
+
+/**
+ * One item's half of a transition: the attributes to set, and the values they
+ * must still hold for the write to be allowed.
+ *
+ * `attribute_not_exists(#k) OR #k = :old` because a record written before
+ * these fields existed has no attribute at all, and an absent array and an
+ * empty one mean the same thing here.
+ */
+function updateFor(username, changes) {
+  const names = {};
+  const values = {};
+  const sets = [];
+  const conditions = [];
+
+  Object.keys(changes).forEach((key, i) => {
+    names[`#k${i}`] = key;
+    values[`:new${i}`] = changes[key].next;
+    values[`:old${i}`] = changes[key].prev;
+    sets.push(`#k${i} = :new${i}`);
+    conditions.push(`(attribute_not_exists(#k${i}) OR #k${i} = :old${i})`);
+  });
+
+  return {
+    Update: {
+      TableName: PLAYERS_TABLE,
+      Key: { username },
+      UpdateExpression: `SET ${sets.join(", ")}`,
+      ConditionExpression: conditions.join(" AND "),
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
+    },
+  };
 }
+
+/** true when a transaction failed only because someone else got there first */
+function isConflict(err) {
+  const name = err?.name ?? "";
+  if (name === "ConditionalCheckFailedException") return true;
+  if (name !== "TransactionCanceledException") return false;
+  return (err.CancellationReasons ?? []).some(
+    (r) => r?.Code === "ConditionalCheckFailed"
+  );
+}
+
+/**
+ * Apply a change to one or both sides of a friendship, atomically.
+ *
+ * `build(a, b)` gets both freshly-read records and returns either an error
+ * string or `{ status, changes: { [username]: { attr: nextValue } } }`. It is
+ * called again on a lost race, so it must be a pure function of what it was
+ * handed — no state carried between attempts.
+ */
+async function commitPair(usernameA, usernameB, build) {
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const [a, b] = await Promise.all([
+      getWallet(usernameA),
+      getWalletIfExists(usernameB),
+    ]);
+    const outcome = build(a, b);
+    if (typeof outcome === "string") return outcome;
+
+    const items = Object.entries(outcome.changes)
+      .map(([username, attrs]) => {
+        const source = username === usernameA ? a : b;
+        const changes = {};
+        for (const [attr, next] of Object.entries(attrs)) {
+          const prev = source[attr] ?? [];
+          // a no-op side would still consume a transaction slot and, worse,
+          // could fail its own condition for no reason
+          if (JSON.stringify(prev) !== JSON.stringify(next)) {
+            changes[attr] = { prev, next };
+          }
+        }
+        return Object.keys(changes).length ? updateFor(username, changes) : null;
+      })
+      .filter(Boolean);
+
+    if (items.length === 0) return outcome.status;
+
+    try {
+      await ddb.send(new TransactWriteCommand({ TransactItems: items }));
+      return outcome.status;
+    } catch (err) {
+      if (!isConflict(err) || attempt === MAX_ATTEMPTS - 1) throw err;
+      // someone changed one of the two records between the read and the
+      // write — read both again and rebuild the decision from what is true now
+    }
+  }
+  return "Please try again";
+}
+
+const without = (list, username) =>
+  (list ?? []).filter((u) => u !== username);
+const withOne = (list, username) =>
+  (list ?? []).includes(username) ? [...list] : [...(list ?? []), username];
+const withoutDenied = (list, username) =>
+  (list ?? []).filter((d) => (typeof d === "string" ? d : d?.username) !== username);
 
 /** returns "accepted", or an error string */
 async function acceptFriendRequest(username, from) {
-  const me = await getWallet(username);
-  if (!me.friendRequests.includes(from)) return "No such request";
-  const other = await getWalletIfExists(from);
-  if (!other) return "User not found";
-  me.friendRequests = me.friendRequests.filter((u) => u !== from);
-  if (!me.friends.includes(from)) me.friends.push(from);
-  if (!other.friends.includes(username)) other.friends.push(username);
-  await Promise.all([saveWallet(me), saveWallet(other)]);
-  return "accepted";
+  return commitPair(username, from, (me, other) => {
+    if (!other) return "User not found";
+    if (!(me.friendRequests ?? []).includes(from)) return "No such request";
+    return {
+      status: "accepted",
+      changes: {
+        [username]: {
+          friendRequests: without(me.friendRequests, from),
+          friends: withOne(me.friends, from),
+        },
+        [from]: {
+          outgoingRequests: without(other.outgoingRequests, username),
+          deniedRequests: withoutDenied(other.deniedRequests, username),
+          friends: withOne(other.friends, username),
+        },
+      },
+    };
+  });
 }
 
-/** returns "sent"/"accepted", or an error string */
+/**
+ * returns "pending"/"accepted", or an error string
+ *
+ * RE-REQUEST POLICY: a previously denied request may be sent again, and doing
+ * so clears the denial. That is deliberate — a denial is not a block, and
+ * making it permanent is a product decision rather than a storage one. The
+ * `at` stamp on the cleared entry is what a cooldown would key off; this is
+ * the one place that rule would go.
+ */
 async function sendFriendRequest(from, to) {
   if (from === to) return "That's you";
-  const target = await getWalletIfExists(to);
-  if (!target) return "User not found";
-  if (target.friends.includes(from)) return "Already friends";
-
-  const me = await getWallet(from);
-  // they already asked us — treat this as an accept
-  if (me.friendRequests.includes(to)) return acceptFriendRequest(from, to);
-  if (target.friendRequests.includes(from)) return "Request already sent";
-  target.friendRequests.push(from);
-  await saveWallet(target);
-  return "sent";
+  return commitPair(from, to, (me, target) => {
+    if (!target) return "User not found";
+    if ((me.friends ?? []).includes(to)) return "Already friends";
+    // they asked first — taking them up on it is the sensible reading of both
+    // people asking, and avoids two pending requests that cancel each other out
+    if ((me.friendRequests ?? []).includes(to)) {
+      return {
+        status: "accepted",
+        changes: {
+          [from]: {
+            friendRequests: without(me.friendRequests, to),
+            friends: withOne(me.friends, to),
+          },
+          [to]: {
+            outgoingRequests: without(target.outgoingRequests, from),
+            deniedRequests: withoutDenied(target.deniedRequests, from),
+            friends: withOne(target.friends, from),
+          },
+        },
+      };
+    }
+    if ((target.friendRequests ?? []).includes(from)) return "Request already sent";
+    return {
+      status: "pending",
+      changes: {
+        [from]: {
+          outgoingRequests: withOne(me.outgoingRequests, to),
+          deniedRequests: withoutDenied(me.deniedRequests, to),
+        },
+        [to]: { friendRequests: withOne(target.friendRequests, from) },
+      },
+    };
+  });
 }
 
+/** returns "denied", or an error string */
 async function declineFriendRequest(username, from) {
-  const me = await getWallet(username);
-  me.friendRequests = me.friendRequests.filter((u) => u !== from);
-  await saveWallet(me);
+  return commitPair(username, from, (me, other) => {
+    if (!(me.friendRequests ?? []).includes(from)) return "No such request";
+    const changes = {
+      [username]: { friendRequests: without(me.friendRequests, from) },
+    };
+    // the denial is recorded on the SENDER, because they are the one who has
+    // to be told. A sender whose account is gone simply has nowhere to record it
+    if (other) {
+      changes[from] = {
+        outgoingRequests: without(other.outgoingRequests, username),
+        deniedRequests: [
+          ...withoutDenied(other.deniedRequests, username),
+          { username, at: Date.now() },
+        ].slice(-DENIED_LIMIT),
+      };
+    }
+    return { status: "denied", changes };
+  });
 }
 
+/** the sender withdrawing their own pending request — returns "cancelled" */
+async function cancelFriendRequest(username, to) {
+  return commitPair(username, to, (me, target) => {
+    if (!(me.outgoingRequests ?? []).includes(to)) return "No such request";
+    const changes = {
+      [username]: { outgoingRequests: without(me.outgoingRequests, to) },
+    };
+    if (target) {
+      changes[to] = { friendRequests: without(target.friendRequests, username) };
+    }
+    return { status: "cancelled", changes };
+  });
+}
+
+/** returns "removed" */
 async function removeFriend(username, other) {
-  const me = await getWallet(username);
-  me.friends = me.friends.filter((u) => u !== other);
-  await saveWallet(me);
-  const them = await getWalletIfExists(other);
-  if (them) {
-    them.friends = them.friends.filter((u) => u !== username);
-    await saveWallet(them);
-  }
+  return commitPair(username, other, (me, them) => {
+    const changes = { [username]: { friends: without(me.friends, other) } };
+    if (them) changes[other] = { friends: without(them.friends, username) };
+    return { status: "removed", changes };
+  });
 }
 
 // ─── handler ───────────────────────────────────────────────────────────────
@@ -393,27 +628,31 @@ export const handler = async (event) => {
     const me = username;
     const them = String(target);
 
-    if (action === "request") {
-      const result = await sendFriendRequest(me, them);
-      if (result !== "sent" && result !== "accepted") {
-        return json(event, 400, { message: result });
-      }
-      return json(event, 200, { status: result });
+    /*
+     * Every transition answers with the STATE the friendship is now in, not
+     * with the verb that was used to get there — "pending", not "sent";
+     * "denied", not "declined". The client reads both spellings, so this is
+     * safe to change without a flag day, and a status vocabulary that matches
+     * the stored one is what makes the two describable in the same words.
+     */
+    const RUN = {
+      request: sendFriendRequest,
+      accept: acceptFriendRequest,
+      decline: declineFriendRequest,
+      cancel: cancelFriendRequest,
+      remove: removeFriend,
+    };
+    const run = RUN[action];
+    if (!run) return json(event, 400, { message: "Unknown action" });
+
+    const result = await run(me, them);
+    const SUCCESS = ["pending", "accepted", "denied", "cancelled", "removed"];
+    if (!SUCCESS.includes(result)) {
+      // every non-status return is one of the refusal strings the handlers
+      // above produce, and each is a bad request rather than a server fault
+      return json(event, 400, { message: result });
     }
-    if (action === "accept") {
-      const result = await acceptFriendRequest(me, them);
-      if (result !== "accepted") return json(event, 400, { message: result });
-      return json(event, 200, { status: result });
-    }
-    if (action === "decline") {
-      await declineFriendRequest(me, them);
-      return json(event, 200, { status: "declined" });
-    }
-    if (action === "remove") {
-      await removeFriend(me, them);
-      return json(event, 200, { status: "removed" });
-    }
-    return json(event, 400, { message: "Unknown action" });
+    return json(event, 200, { status: result });
   } catch (err) {
     console.error("friend action error:", err);
     return json(event, 500, { message: "Internal server error" });
