@@ -100,6 +100,14 @@
         "dynamodb:PutItem"
       ],
       "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/Matches"
+    },
+    {
+      "Sid": "ChatMessagesWrite",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:PutItem"
+      ],
+      "Resource": "arn:aws:dynamodb:eu-west-3:637423486388:table/ChatMessages"
     }
   ]
 }

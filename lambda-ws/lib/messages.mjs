@@ -10,6 +10,7 @@
 import { MIN_BET, nowMs } from "./config.mjs";
 import { broadcast } from "./connections.mjs";
 import { quotasFor } from "./pot.mjs";
+import { recordChatMessage } from "./chatlog.mjs";
 import { persistMatchResults } from "./results.mjs";
 import { publicGameState } from "./state.mjs";
 
@@ -196,13 +197,18 @@ async function broadcastGameState(event, lobbyId, state) {
  * instead of rendering the English `text`, which stays as the fallback.
  */
 async function systemChat(event, lobbyId, text, reason = null) {
+  const at = Date.now();
   await broadcast(event, lobbyId, {
     type: "chat_message",
     username: null,
     text,
     ...(reason ? { reason } : {}),
-    at: Date.now(),
+    at,
   });
+  // kept alongside what players typed, and marked as the room's own voice —
+  // a transcript that cannot tell the two apart reads as if the room were
+  // talking to itself
+  await recordChatMessage({ lobbyId, text, at, kind: "system", reason });
 }
 
 export {

@@ -15,6 +15,7 @@ import {
   CONNECTIONS_TABLE,
 } from "../config.mjs";
 import { broadcast, postTo, ttlFromNow } from "../connections.mjs";
+import { recordChatMessage } from "../chatlog.mjs";
 
 /** chat — flood-controlled the same way GameRoom.receiveChat() is */
 async function onChat(event, connectionId, msg, row) {
@@ -49,6 +50,18 @@ async function onChat(event, connectionId, msg, row) {
     displayName: row.displayName || row.username,
     text,
     at: now,
+  });
+
+  // the room has it; this keeps it. Recorded AFTER the broadcast and never
+  // awaited for correctness — see chatlog.mjs on why a failure here is not
+  // allowed to be the chat's problem
+  await recordChatMessage({
+    lobbyId: row.lobbyId,
+    username: row.username,
+    displayName: row.displayName || row.username,
+    text,
+    at: now,
+    kind: "player",
   });
 }
 

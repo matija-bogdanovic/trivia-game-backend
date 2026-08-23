@@ -28,6 +28,12 @@ const LOBBIES_TABLE = process.env.LOBBIES_TABLE || "Lobbies";
 const PLAYERS_TABLE = process.env.PLAYERS_TABLE || "Players";
 const MATCHES_TABLE = process.env.MATCHES_TABLE || "Matches";
 
+/**
+ * Every chat line ever sent, one item per message. No TTL by design — see
+ * lib/chatlog.mjs; this is a collection, not a cache.
+ */
+const CHAT_MESSAGES_TABLE = process.env.CHAT_MESSAGES_TABLE || "ChatMessages";
+
 /* ── MATCH RESULTS ─────────────────────────────────────────────────────────
  * The rewards a finished match pays out. Ported verbatim from the legacy
  * Express server's game/wallet.ts so a match scored there and a match scored
@@ -263,6 +269,7 @@ export {
   BETTING_TIME_MS,
   CHALLENGE_DIFFICULTY_BUMP,
   CHAT_HISTORY_LIMIT,
+  CHAT_MESSAGES_TABLE,
   CHAT_MAX_LENGTH,
   CHAT_MIN_INTERVAL_MS,
   CODE_DUEL_TIME_MS,
