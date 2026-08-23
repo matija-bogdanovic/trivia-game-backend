@@ -54,7 +54,9 @@
  *   to an empty string here.
  *
  * ── CONTRACT (matches the Express route exactly — do not change) ───────────
- *   Request:  POST /wallet   { "displayName"?: "..." }   (optional rename)
+ *   Request:  POST /wallet   { "displayName"?: "...",   (optional rename)
+ *                              "googlePicture"?: "https://…" }
+ *                              — adopted as the avatar only when there is none
  *   Response: 200 { credits, coins, avatar, ownedAvatars, wins, gamesPlayed,
  *                  roundsPlayed, matchHistory, points, currentStreak,
  *                  currentLosingStreak, longestLosingStreak,
@@ -350,6 +352,34 @@ export const handler = async (event) => {
 
   try {
     const wallet = await getWallet(username);
+
+    /*
+     * A Google picture, adopted ONLY when there is nothing to lose.
+     *
+     * The client sends the `picture` claim from its ID token after a federated
+     * sign-in. It is written as the avatar only when the player has none —
+     * never over one they uploaded, never over an emoji they picked, and never
+     * over a Google URL already stored, so re-signing in does not churn the
+     * record. A default is what somebody gets before they choose; the moment
+     * they choose, this stops having an opinion.
+     *
+     * Stored as "g|<url>" beside the existing "u|<version>" and
+     * "e|<emoji>|<hue>" so the one decoder on the client keeps being the one
+     * decoder. Only https is accepted and the length is capped: this string is
+     * rendered as an <img src> by every screen that shows a player, and it
+     * arrives from a token rather than from anything this service controls.
+     */
+    const picture = body.googlePicture;
+    if (
+      !wallet.avatar &&
+      typeof picture === "string" &&
+      picture.startsWith("https://") &&
+      picture.length <= 500
+    ) {
+      wallet.avatar = `g|${picture}`;
+      await saveWallet(wallet);
+    }
+
     const displayName = body.displayName;
     if (
       typeof displayName === "string" &&
