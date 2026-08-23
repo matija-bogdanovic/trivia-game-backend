@@ -65,11 +65,13 @@ function conditionHolds(item, input) {
   if (expr === "attribute_not_exists(match_id)") return item === undefined;
 
   // (attribute_not_exists(#cs) OR #cs = :prevCs) AND (attribute_not_exists(#ach) OR size(#ach) = :prevAchCount)
-  const cs = names["#cs"], ach = names["#ach"];
+  const cs = names["#cs"], cls = names["#cls"], ach = names["#ach"];
   const streakOk = item?.[cs] === undefined || item[cs] === values[":prevCs"];
+  const losingOk =
+    item?.[cls] === undefined || item[cls] === values[":prevCls"];
   const achOk =
     item?.[ach] === undefined || (item[ach] ?? []).length === values[":prevAchCount"];
-  return streakOk && achOk;
+  return streakOk && losingOk && achOk;
 }
 
 function applyUpdate(item, input) {
@@ -289,6 +291,60 @@ console.log("\n── spectators are not paid and not archived ──");
   await results.persistMatchResults({}, s);
   check("watcher got no record", players.has("watcher"), false);
   check("archive lists three", matches.get("spec1").participants.length, 3);
+}
+
+console.log("\n── LOSING STREAK: mirrors the winning one ──");
+{
+  reset();
+  // ana wins, bob and cy lose
+  await results.persistMatchResults({}, makeState({ matchId: "L1" }));
+  check("winner has no losing streak", players.get("ana").currentLosingStreak, 0);
+  check("loser starts one", players.get("bob").currentLosingStreak, 1);
+  check("longest tracks it", players.get("bob").longestLosingStreak, 1);
+  check("winner's win streak still moves", players.get("ana").currentStreak, 1);
+}
+
+console.log("\n── it accumulates across losses ──");
+{
+  for (let i = 2; i <= 4; i++) {
+    await results.persistMatchResults({}, makeState({ matchId: `L${i}` }));
+  }
+  const bob = players.get("bob");
+  check("four losses in a row", bob.currentLosingStreak, 4);
+  check("longest = 4", bob.longestLosingStreak, 4);
+  check("bob never won", bob.wins, 0);
+  check("and his WIN streak stayed 0", bob.currentStreak, 0);
+}
+
+console.log("\n── a win resets it, but longest is remembered ──");
+{
+  await results.persistMatchResults({}, makeState({ matchId: "L5", winner: "bob" }));
+  const bob = players.get("bob");
+  check("losing streak reset", bob.currentLosingStreak, 0);
+  check("longest remembered", bob.longestLosingStreak, 4);
+  check("win streak started", bob.currentStreak, 1);
+  // and the previous winner has now lost one
+  check("ana picked up a loss", players.get("ana").currentLosingStreak, 1);
+  check("ana's win streak reset", players.get("ana").currentStreak, 0);
+}
+
+console.log("\n── the two streaks are never both running ──");
+{
+  reset();
+  for (let i = 1; i <= 6; i++) {
+    // alternate the winner so both counters get exercised
+    const winner = i % 2 === 0 ? "ana" : "bob";
+    await results.persistMatchResults({}, makeState({ matchId: `alt${i}`, winner }));
+    for (const u of ["ana", "bob", "cy"]) {
+      const p = players.get(u);
+      if (p.currentStreak > 0 && p.currentLosingStreak > 0) {
+        check(`${u} had both streaks running at once`, true, false);
+      }
+    }
+  }
+  check("cy lost all six", players.get("cy").currentLosingStreak, 6);
+  check("cy's longest is six", players.get("cy").longestLosingStreak, 6);
+  check("never both at once", true, true);
 }
 
 console.log(`\n${"=".repeat(60)}`);

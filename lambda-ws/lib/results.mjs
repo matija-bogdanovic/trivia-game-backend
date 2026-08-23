@@ -195,6 +195,20 @@ async function applyToPlayer(match, game) {
 
     const currentStreak = game.wonGame ? prevStreak + 1 : 0;
     const bestStreak = Math.max(num(w.bestStreak), currentStreak);
+
+    /*
+     * The losing streak is the exact mirror, and the two are mutually
+     * exclusive by construction: a match is a win or it is not, so exactly one
+     * of these advances and the other is zeroed. Keeping them as separate
+     * fields rather than one signed counter means neither has to be read
+     * through a sign convention, and "longest" of each stays a plain max.
+     */
+    const prevLosing = num(w.currentLosingStreak);
+    const currentLosingStreak = game.wonGame ? 0 : prevLosing + 1;
+    const longestLosingStreak = Math.max(
+      num(w.longestLosingStreak),
+      currentLosingStreak
+    );
     const pointsGained = game.wonGame
       ? POINTS_PER_WIN +
         Math.min(POINTS_STREAK_BONUS_CAP, POINTS_STREAK_BONUS * (currentStreak - 1))
@@ -226,19 +240,25 @@ async function applyToPlayer(match, game) {
           TableName: PLAYERS_TABLE,
           Key: { username: game.username },
           UpdateExpression:
-            "SET #cs = :cs, #bs = :bs, #mh = :mh, #ach = :ach, " +
+            "SET #cs = :cs, #bs = :bs, #cls = :cls, #lls = :lls, " +
+            "#mh = :mh, #ach = :ach, " +
             "#credits = if_not_exists(#credits, :cap), " +
             "#refill = if_not_exists(#refill, :now) " +
             "ADD #wins :w, #games :one, #points :p, #coins :c, " +
             "#rounds :r, #bets :b",
-          // only the three read-dependent fields are guarded; the counters are
-          // ADD and cannot be lost whatever else happened to the item
+          // only the read-dependent fields are guarded; the counters are ADD
+          // and cannot be lost whatever else happened to the item. Both streaks
+          // are checked, not just the winning one — they are written together
+          // and a guard on half of them would let the other be clobbered
           ConditionExpression:
             "(attribute_not_exists(#cs) OR #cs = :prevCs) AND " +
+            "(attribute_not_exists(#cls) OR #cls = :prevCls) AND " +
             "(attribute_not_exists(#ach) OR size(#ach) = :prevAchCount)",
           ExpressionAttributeNames: {
             "#cs": "currentStreak",
             "#bs": "bestStreak",
+            "#cls": "currentLosingStreak",
+            "#lls": "longestLosingStreak",
             "#mh": "matchHistory",
             "#ach": "achievements",
             "#credits": "credits",
@@ -253,9 +273,12 @@ async function applyToPlayer(match, game) {
           ExpressionAttributeValues: {
             ":cs": currentStreak,
             ":bs": bestStreak,
+            ":cls": currentLosingStreak,
+            ":lls": longestLosingStreak,
             ":mh": history,
             ":ach": achievements,
             ":prevCs": prevStreak,
+            ":prevCls": prevLosing,
             ":prevAchCount": prevAchievements.length,
             ":cap": CREDIT_CAP,
             ":now": Date.now(),

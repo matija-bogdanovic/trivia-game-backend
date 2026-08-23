@@ -57,6 +57,7 @@
  *   Request:  POST /wallet   { "displayName"?: "..." }   (optional rename)
  *   Response: 200 { credits, coins, avatar, ownedAvatars, wins, gamesPlayed,
  *                  roundsPlayed, matchHistory, points, currentStreak,
+ *                  currentLosingStreak, longestLosingStreak,
  *                  bestStreak, achievements, achievementCatalog,
  *                  nextCreditInMs, shop }
  *   Auth:     Authorization: Bearer <Cognito ACCESS token>
@@ -245,6 +246,8 @@ function freshWallet(username) {
     points: 0,
     currentStreak: 0,
     bestStreak: 0,
+    currentLosingStreak: 0,
+    longestLosingStreak: 0,
     betsWon: 0,
     achievements: [],
     friends: [],
@@ -263,6 +266,8 @@ function withDefaults(w) {
   w.matchHistory ??= [];
   w.points ??= 0;
   w.currentStreak ??= 0;
+  w.currentLosingStreak ??= 0;
+  w.longestLosingStreak ??= 0;
   w.bestStreak ??= 0;
   w.betsWon ??= 0;
   w.achievements ??= [];
@@ -365,6 +370,11 @@ export const handler = async (event) => {
       matchHistory: wallet.matchHistory,
       points: wallet.points,
       currentStreak: wallet.currentStreak,
+      // the mirror of the win streak, written by the same match-end pass in
+      // lambda-ws/lib/results.mjs. Returned so a screen can show it; nothing
+      // renders it yet
+      currentLosingStreak: wallet.currentLosingStreak,
+      longestLosingStreak: wallet.longestLosingStreak,
       bestStreak: wallet.bestStreak,
       achievements: wallet.achievements,
       achievementCatalog: ACHIEVEMENTS.map((a) => ({ id: a.id, name: a.name })),
