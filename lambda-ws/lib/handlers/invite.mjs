@@ -28,11 +28,17 @@
  * so it is tens of items, not millions. lambda/friendsList.mjs already scans it
  * for exactly this reason and says so; this is that same read.
  *
- * ── OFFLINE IS A REFUSAL, NOT A QUEUE ──────────────────────────────────────
- * No live socket means `invite_failed { reason: "offline" }` and nothing is
- * stored. A durable invite belongs with the notification feed — a table, an
- * unread count, a way to read it later — and half of that (a write with no
- * reader) would be worse than the honest refusal.
+ * ── OFFLINE IS NO LONGER A REFUSAL ─────────────────────────────────────────
+ * It used to be: no live socket meant `invite_failed: "offline"` and nothing
+ * was stored, because a write with no reader is worse than an honest no.
+ *
+ * The Notifications table is that reader. So the invite now goes through
+ * notify(), which writes the durable row and pushes to whatever sockets exist
+ * — and there is no branch on presence at all. A friend who is reading the
+ * site gets the banner; a friend who is away finds the invite in their bell
+ * when they come back. The sender is told which of the two happened, because
+ * "they will see it later" and "they are looking at it now" are different
+ * things to know.
  * ===========================================================================
  */
 
@@ -42,6 +48,7 @@ import { ddb } from "../aws.mjs";
 import { CONNECTIONS_TABLE, PLAYERS_TABLE } from "../config.mjs";
 import { postTo, ttlFromNow } from "../connections.mjs";
 import { resolveLobby } from "../lobbies.mjs";
+import { notify } from "../notify.mjs";
 
 /**
  * hello — authenticate a socket that is not in a room.
@@ -145,39 +152,54 @@ async function onInviteFriend(event, connectionId, row, msg) {
     return;
   }
 
-  const sockets = await connectionsForUser(target);
-  if (sockets.length === 0) {
-    // no live socket: nothing to push to, and nothing is queued — see header
-    await fail(event, connectionId, "offline", target);
-    return;
-  }
-
   /*
-   * The invite carries what the banner needs to be worth reading — who is
-   * asking and which room — plus the lobbyId the accept navigates to. It does
-   * NOT carry the room password: a private room is entered through the invite
-   * itself, and a password sent over a socket to be echoed back is a password
-   * handed out.
+   * What the invite carries: enough for the banner and the bell row to be
+   * worth reading, plus the lobbyId an accept navigates to.
+   *
+   * It does NOT carry the room password. A private room is entered through the
+   * invite itself, and a password sent over a socket to be echoed back is a
+   * password handed out.
+   *
+   * No display sentence is stored either — the client owns the wording, and a
+   * translated string written into the table would be frozen in whichever
+   * language the SENDER happened to be reading.
    */
-  const invite = {
-    type: "room_invite",
+  const data = {
     lobbyId: String(lobbyId),
     code: lobby.code ?? null,
     roomName: lobby.roomName ?? "",
     isPrivate: Boolean(lobby.isPrivate),
     from,
     fromName: row?.displayName ?? from,
-    at: Date.now(),
   };
 
+  const saved = await notify(event, {
+    username: target,
+    kind: "room_invite",
+    data,
+  });
+  if (!saved) {
+    await fail(event, connectionId, "generic", target);
+    return;
+  }
+
+  /*
+   * The banner is the LIVE half and is sent separately, because it is a
+   * different thing from the bell row: it demands an answer now, where the row
+   * waits to be read. A friend who is away simply does not get one.
+   */
+  const sockets = await connectionsForUser(target);
   await Promise.all(
-    sockets.map((s) => postTo(event, s.connectionId, invite))
+    sockets.map((s) =>
+      postTo(event, s.connectionId, { type: "room_invite", ...data, at: saved.at })
+    )
   );
 
   await postTo(event, connectionId, {
     type: "invite_sent",
     target,
-    sockets: sockets.length,
+    // false means "it is in their notifications", not "it failed"
+    live: sockets.length > 0,
   });
 }
 

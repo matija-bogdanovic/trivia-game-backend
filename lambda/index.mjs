@@ -75,6 +75,8 @@ const ROUTES = {
   "POST /friends/list": "./friendsList.mjs",
   "POST /friends/action": "./friendsAction.mjs",
   "POST /matches/detail": "./matchDetail.mjs",
+  "POST /notifications": "./notifications.mjs",
+  "POST /notifications/read": "./notifications.mjs",
   "POST /myActiveRoom": "./myActiveRoom.mjs",
   "POST /createRoom": "./createRoom.mjs",
   "POST /joinRoom": "./joinRoom.mjs",

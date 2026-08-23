@@ -26,6 +26,10 @@ const WS_ENDPOINT =
 const LOBBY_INDEX = process.env.CONNECTIONS_LOBBY_INDEX || "lobby-index";
 const LOBBIES_TABLE = process.env.LOBBIES_TABLE || "Lobbies";
 const PLAYERS_TABLE = process.env.PLAYERS_TABLE || "Players";
+const NOTIFICATIONS_TABLE =
+  process.env.NOTIFICATIONS_TABLE || "Notifications";
+/** a notification is worth reading for a while and worthless afterwards */
+const NOTIFICATION_TTL_DAYS = 30;
 const MATCHES_TABLE = process.env.MATCHES_TABLE || "Matches";
 
 /**
@@ -318,6 +322,8 @@ export {
   CREDIT_CAP,
   MATCHES_TABLE,
   MATCH_HISTORY_LIMIT,
+  NOTIFICATIONS_TABLE,
+  NOTIFICATION_TTL_DAYS,
   PLAYERS_TABLE,
   POINTS_PER_WIN,
   POINTS_STREAK_BONUS,

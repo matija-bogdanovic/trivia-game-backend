@@ -30,6 +30,10 @@ function buildTestableCopy() {
       "const resolveLobby = (id) => globalThis.__LOBBY__(id);",
     ],
     [
+      'import { notify } from "../notify.mjs";',
+      "const notify = (...a) => globalThis.__NOTIFY__(...a);",
+    ],
+    [
       'import { identityFromToken } from "../auth.mjs";',
       "const identityFromToken = (t) => globalThis.__IDENT__(t);",
     ],
@@ -58,6 +62,19 @@ globalThis.__POST__ = async (_event, connectionId, message) => {
   sent.push({ connectionId, message });
 };
 globalThis.__LOBBY__ = async () => lobby;
+/*
+ * notify() is the real module in production; here it is a spy, because what
+ * this file is testing is that invite_friend CALLS it with the right thing —
+ * notify's own write-then-push is covered by its own behaviour, not by an
+ * invite test pretending to be a database.
+ */
+let notified = [];
+let notifyFails = false;
+globalThis.__NOTIFY__ = async (_event, payload) => {
+  if (notifyFails) return null;
+  notified.push(payload);
+  return { id: "1#abcd", at: 1700000000000, ...payload };
+};
 globalThis.__IDENT__ = async (token) =>
   token === "good" ? { username: "ana" } : null;
 globalThis.__DDB__ = {
@@ -88,7 +105,7 @@ function check(label, actual, expected) {
   if (a === e) { pass++; console.log(`  ok   ${label}`); }
   else { failures.push(label); console.log(`  FAIL ${label}\n       expected ${e}\n       actual   ${a}`); }
 }
-const reset = () => { sent = []; updates = []; };
+const reset = () => { sent = []; updates = []; notified = []; notifyFails = false; };
 const lastToSender = () => sent.filter((s) => s.connectionId === "c-ana").pop()?.message;
 
 const ANA_IN_ROOM = { username: "ana", lobbyId: "lob1", displayName: "ANA" };
@@ -142,8 +159,16 @@ console.log("\n── invite: the refusals ──");
   connections = [];
   reset();
   await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "bob" });
-  check("offline — nothing pushed", lastToSender().reason, "offline");
-  check("and nothing was stored", updates.length, 0);
+  check("offline is NOT a refusal any more", lastToSender().type, "invite_sent");
+  check("the notification was still written", notified.length, 1);
+  check("and the sender is told it was not live", lastToSender().live, false);
+  check("no banner went anywhere",
+    sent.filter((x) => x.message.type === "room_invite").length, 0);
+
+  reset();
+  notifyFails = true;
+  await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "bob" });
+  check("a failed durable write IS a refusal", lastToSender().reason, "generic");
 }
 
 console.log("\n── invite: the happy path ──");
@@ -157,11 +182,18 @@ console.log("\n── invite: the happy path ──");
   reset();
   await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "bob" });
 
+  check("the notification is written once", notified.length, 1);
+  check("addressed to the target", notified[0].username, "bob");
+  check("with the kind the client switches on", notified[0].kind, "room_invite");
+  check("no display sentence is stored", "text" in notified[0].data, false);
+
   const invites = sent.filter((s) => s.message.type === "room_invite");
-  check("every one of bob's sockets got it", invites.length, 2);
+  check("every one of bob's sockets got the live banner", invites.length, 2);
   check("and nobody else's did",
     invites.every((i) => i.connectionId.startsWith("c-bob")), true);
   const inv = invites[0].message;
+  check("the banner and the row carry the same data",
+    JSON.stringify(notified[0].data.lobbyId), JSON.stringify(inv.lobbyId));
   check("carries the lobby to navigate to", inv.lobbyId, "lob1");
   check("carries the room name", inv.roomName, "ARENA");
   check("carries the code", inv.code, 4242);
@@ -170,7 +202,7 @@ console.log("\n── invite: the happy path ──");
   check("marks a private room as private", inv.isPrivate, true);
   check("NEVER carries the password", "password" in inv, false);
   check("the sender is told it went", lastToSender().type, "invite_sent");
-  check("and to how many sockets", lastToSender().sockets, 2);
+  check("and that it landed live", lastToSender().live, true);
 }
 
 console.log("\n── the lobby's player list may hold bare strings ──");
