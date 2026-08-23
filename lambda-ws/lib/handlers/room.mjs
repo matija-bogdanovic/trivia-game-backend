@@ -186,6 +186,39 @@ async function onLeave(event, connectionId, row) {
     await closeRoom(event, lobbyId, "host_left");
     return;
   }
+  /*
+   * ── THE SEAT, NOT JUST THE SOCKET ────────────────────────────────────────
+   * This used to clear the connection row and stop, leaving the player on the
+   * Lobbies roster. lobbyStateMessage builds its seat list from that roster
+   * and only marks `connected` from the live sockets — so leaving turned a
+   * player grey and left them sitting in the room. The seat never freed, and
+   * a full room stayed full.
+   *
+   * The durable removal did exist, in POST /leaveRoom, but it could not be
+   * relied on for two reasons. It is looked up BY ROOM CODE, and the client
+   * skips the call entirely when it has no code — which is every client that
+   * has not yet received a lobby_state. And even when it runs, it runs in a
+   * different Lambda AFTER this broadcast, so the seat update everybody
+   * receives here still contains the leaver, and nothing broadcasts again.
+   *
+   * So the roster edit moves here, in front of the broadcast, where the two
+   * cannot get out of order. The REST route stays as it is: it is idempotent,
+   * filtering a name out of a list that no longer holds it changes nothing,
+   * and it is still the path for a client whose socket has already gone.
+   */
+  const roster = Array.isArray(lobby?.players) ? lobby.players : [];
+  const withoutThem = roster.filter((p) => String(p.player) !== row.username);
+  if (withoutThem.length !== roster.length) {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: LOBBIES_TABLE,
+        Key: { lobby_id: String(lobby.lobby_id) },
+        UpdateExpression: "SET players = :p",
+        ExpressionAttributeValues: { ":p": withoutThem },
+      })
+    );
+  }
+
   await ddb.send(
     new UpdateCommand({
       TableName: CONNECTIONS_TABLE,

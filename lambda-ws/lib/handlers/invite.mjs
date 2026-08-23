@@ -45,7 +45,7 @@
 import { ScanCommand, UpdateCommand, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { identityFromToken } from "../auth.mjs";
 import { ddb } from "../aws.mjs";
-import { CONNECTIONS_TABLE, PLAYERS_TABLE } from "../config.mjs";
+import { CONNECTIONS_TABLE, PLAYERS_TABLE, capacityOf } from "../config.mjs";
 import { postTo, ttlFromNow } from "../connections.mjs";
 import { resolveLobby } from "../lobbies.mjs";
 import { notify } from "../notify.mjs";
@@ -149,6 +149,21 @@ async function onInviteFriend(event, connectionId, row, msg) {
   const here = Array.isArray(lobby.players) ? lobby.players : [];
   if (here.some((p) => (typeof p === "string" ? p : p?.username) === target)) {
     await fail(event, connectionId, "already-here", target);
+    return;
+  }
+
+  /*
+   * A full room cannot be invited into.
+   *
+   * The button is disabled once the seats are taken, but a disabled button is
+   * a courtesy and not a rule: two people can press invite in the same second
+   * on the last free seat, and an invite that arrives at a room with nowhere
+   * to sit is a notification whose only outcome is join_denied. Checked
+   * against the room's OWN capacity via capacityOf, not a constant, because
+   * rooms are created with two to eight seats.
+   */
+  if (here.length >= capacityOf(lobby)) {
+    await fail(event, connectionId, "room-full", target);
     return;
   }
 

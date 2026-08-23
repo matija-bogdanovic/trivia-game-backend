@@ -55,6 +55,23 @@ async function onJoin(event, connectionId, msg, row) {
 
   const lobby = await resolveLobby(lobbyId);
   if (!lobby) {
+    /*
+     * join_denied, not a bare error.
+     *
+     * "Room not found" arrived as a generic error string, which the client
+     * could only render as a dismissible banner — leaving the reader parked on
+     * the URL of a room that does not exist, with nothing to do but type
+     * somewhere else. A reason code is something the client can ACT on, and
+     * this one means "go back to the list".
+     *
+     * The error is still sent alongside it for any client that predates the
+     * reason code and only knows how to show a message.
+     */
+    await postTo(event, connectionId, {
+      type: "join_denied",
+      reason: "room-gone",
+      lobbyId,
+    });
     await postTo(event, connectionId, {
       type: "error",
       message: "Room not found",

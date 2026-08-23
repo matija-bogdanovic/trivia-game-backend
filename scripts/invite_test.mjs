@@ -38,8 +38,9 @@ function buildTestableCopy() {
       "const identityFromToken = (t) => globalThis.__IDENT__(t);",
     ],
     [
-      'import { CONNECTIONS_TABLE, PLAYERS_TABLE } from "../config.mjs";',
-      'const CONNECTIONS_TABLE = "Connections";\nconst PLAYERS_TABLE = "Players";',
+      'import { CONNECTIONS_TABLE, PLAYERS_TABLE, capacityOf } from "../config.mjs";',
+      'const CONNECTIONS_TABLE = "Connections";\nconst PLAYERS_TABLE = "Players";\n' +
+        "const capacityOf = (l) => Number(l?.maxPlayers ?? 6);",
     ],
   ];
   for (const [from, to] of swaps) {
@@ -203,6 +204,35 @@ console.log("\n── invite: the happy path ──");
   check("NEVER carries the password", "password" in inv, false);
   check("the sender is told it went", lastToSender().type, "invite_sent");
   check("and that it landed live", lastToSender().live, true);
+}
+
+console.log("\n── a full room refuses the invite ──");
+{
+  // six seats taken, none of them the target
+  lobby = {
+    code: 1, roomName: "R", maxPlayers: 6,
+    players: ["p1","p2","p3","p4","p5","p6"].map((u) => ({ username: u })),
+  };
+  connections = [{ connectionId: "c-bob-1", username: "bob" }];
+  reset();
+  await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "bob" });
+  check("refused as full", lastToSender().reason, "room-full");
+  check("and nothing was written", notified.length, 0);
+
+  // the same room with a seat free
+  lobby.players = lobby.players.slice(0, 5);
+  reset();
+  await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "bob" });
+  check("one seat free is enough", lastToSender().type, "invite_sent");
+
+  // a room built for four is full at four, not at six
+  lobby = {
+    code: 1, roomName: "R", maxPlayers: 4,
+    players: ["p1","p2","p3","p4"].map((u) => ({ username: u })),
+  };
+  reset();
+  await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "bob" });
+  check("capacity is the ROOM's, not a constant", lastToSender().reason, "room-full");
 }
 
 console.log("\n── the lobby's player list may hold bare strings ──");
