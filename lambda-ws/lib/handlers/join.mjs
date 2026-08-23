@@ -181,6 +181,24 @@ async function onJoin(event, connectionId, msg, row) {
     const spectating = !(running.players ?? []).some(
       (p) => p.username === username
     );
+
+    /*
+     * SPECTATING IS THE HOST'S CHOICE. A room created with it off refuses
+     * latecomers outright rather than seating them as silent watchers — the
+     * socket is closed off with join_denied, the same way a full room or a
+     * wrong password is, so the client already knows how to render it.
+     *
+     * Absent means allowed: every room created before the toggle existed was
+     * watchable, and flipping them closed on deploy would be a change nobody
+     * asked for.
+     */
+    if (spectating && lobby.spectateEnabled === false) {
+      await postTo(event, connectionId, {
+        type: "join_denied",
+        reason: "spectating_disabled",
+      });
+      return;
+    }
     await postTo(event, connectionId, {
       type: "game_state",
       state: publicGameState(running),

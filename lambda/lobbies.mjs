@@ -82,12 +82,14 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   ScanCommand,
+  BatchGetCommand,
 } from "@aws-sdk/lib-dynamodb";
 
 // ─── config ────────────────────────────────────────────────────────────────
 const REGION = process.env.AWS_REGION || "eu-west-3";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? "http://localhost:3000";
 const LOBBIES_TABLE = process.env.LOBBIES_TABLE || "Lobbies";
+const GAME_STATE_TABLE = process.env.GAME_STATE_TABLE || "GameState";
 
 // clients at module scope so warm invocations reuse the connections
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
@@ -141,18 +143,69 @@ const DEFAULT_STARTING_MONEY = 500;
  * was created within the last hour. The "connected right now" arm needs the
  * live game server — see the DEGRADED note above.
  */
+/**
+ * Which rooms have a match actually running.
+ *
+ * The `phase` this route used to report was the literal string "lobby" for
+ * every room, from before there was a turn engine to ask — so the browse list
+ * could not tell a room waiting for players from one three rounds deep.
+ *
+ * GameState is the authority: one item per room, keyed by lobbyId. A room with
+ * no state has never started; one sitting in "lobby" or "gameover" is not
+ * playing. BatchGet rather than a Get per room, because the whole list is
+ * wanted at once and a browse page should be one round trip, not N.
+ */
+async function runningPhases(lobbyIds) {
+  const phases = new Map();
+  // BatchGetItem takes 100 keys per call
+  for (let i = 0; i < lobbyIds.length; i += 100) {
+    const chunk = lobbyIds.slice(i, i + 100);
+    if (!chunk.length) continue;
+    try {
+      const res = await ddb.send(
+        new BatchGetCommand({
+          RequestItems: {
+            [GAME_STATE_TABLE]: {
+              Keys: chunk.map((lobbyId) => ({ lobbyId })),
+              ProjectionExpression: "lobbyId, phase",
+            },
+          },
+        })
+      );
+      for (const item of res.Responses?.[GAME_STATE_TABLE] ?? []) {
+        phases.set(String(item.lobbyId), String(item.phase ?? "lobby"));
+      }
+    } catch (err) {
+      // a browse list that cannot read the phase is still a browse list —
+      // every room falls back to "waiting", which is what it showed before
+      console.error("lobby phase lookup failed:", err);
+    }
+  }
+  return phases;
+}
+
+/** green means join in, yellow means it started without you */
+function statusFor(phase) {
+  if (!phase || phase === "lobby" || phase === "countdown") return "waiting";
+  if (phase === "gameover") return "waiting";
+  return "playing";
+}
+
 async function listActiveLobbies() {
   const scan = await ddb.send(
     new ScanCommand({
       TableName: LOBBIES_TABLE,
       ProjectionExpression:
-        "lobby_id, code, roomName, players, createdAt, isPrivate, #st, #cat, maxPlayers, startingMoney",
+        "lobby_id, code, roomName, players, createdAt, isPrivate, #st, #cat, maxPlayers, startingMoney, spectateEnabled",
       ExpressionAttributeNames: { "#st": "state", "#cat": "categories" },
     })
   );
-  return (scan.Items ?? [])
-    .filter((l) => l.state !== "finished")
+  const rows = (scan.Items ?? []).filter((l) => l.state !== "finished");
+  const phases = await runningPhases(rows.map((l) => String(l.lobby_id)));
+
+  return rows
     .map((l) => {
+      const phase = phases.get(String(l.lobby_id)) ?? null;
       const players = Array.isArray(l.players) ? l.players : [];
       const host = players.find((p) => p?.role === "Admin");
       return {
@@ -169,8 +222,15 @@ async function listActiveLobbies() {
         // the stake this room is played for, so the join screen can show it
         // before anyone commits a credit to entering
         startingMoney: Number(l.startingMoney ?? DEFAULT_STARTING_MONEY),
-        phase: "lobby",
-        isLive: false,
+        // the real phase now, from GameState — this was hardcoded "lobby"
+        phase: phase ?? "lobby",
+        status: statusFor(phase),
+        isLive: statusFor(phase) === "playing",
+        // whether latecomers may watch; rooms created before the flag existed
+        // predate the toggle and were all watchable, so absent means true
+        spectateEnabled: l.spectateEnabled === undefined
+          ? true
+          : Boolean(l.spectateEnabled),
         createdAt: l.createdAt ?? null,
         host: host ? String(host.player) : null,
         categories: Array.isArray(l.categories)

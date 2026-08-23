@@ -407,6 +407,15 @@ const DEFAULT_CATEGORIES = [];
 const MAX_CATEGORIES = 32;
 
 /**
+ * Whether latecomers may watch a match already in progress.
+ *
+ * Defaults TRUE. Spectating already shipped and works; defaulting it off would
+ * silently switch off a live feature for every room created from here on, and
+ * a host who wants a closed table can say so.
+ */
+const DEFAULT_SPECTATE_ENABLED = true;
+
+/**
  * Normalises the `categories` field off the request body.
  *   missing / null / empty  -> [] (every category)
  *   array of strings        -> trimmed, de-duplicated, capped
@@ -491,13 +500,17 @@ export const handler = async (event) => {
 
   try {
     const {
-      playerId, roomName, isPrivate, password, categories, maxPlayers,
+      playerId, roomName, isPrivate, password, categories, maxPlayers, spectateEnabled,
       startingMoney,
     } = body;
     if (!roomName) {
       return json(event, 400, { error: "Missing required fields" });
     }
     const roomCategories = normalizeCategories(categories);
+    // anything but an explicit false leaves watching on
+    const roomSpectateEnabled = spectateEnabled === undefined
+      ? DEFAULT_SPECTATE_ENABLED
+      : Boolean(spectateEnabled);
     if (roomCategories === null) {
       return json(event, 400, {
         error: "categories must be an array of strings",
@@ -539,6 +552,7 @@ export const handler = async (event) => {
           code: Number(roomCode),
           isPrivate: roomIsPrivate,
           categories: roomCategories,
+          spectateEnabled: roomSpectateEnabled,
           maxPlayers: roomMaxPlayers,
           // what every seat is worth when the match starts. The WebSocket
           // function reads this when it seeds the match state, so the number

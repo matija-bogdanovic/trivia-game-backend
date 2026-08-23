@@ -95,6 +95,7 @@
 import crypto from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
+  ScanCommand,
   DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
@@ -104,6 +105,8 @@ import {
 const REGION = process.env.AWS_REGION || "eu-west-3";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? "http://localhost:3000";
 const PLAYERS_TABLE = process.env.PLAYERS_TABLE || "Players";
+const CONNECTIONS_TABLE = process.env.CONNECTIONS_TABLE || "Connections";
+const GAME_STATE_TABLE = process.env.GAME_STATE_TABLE || "GameState";
 
 /*
  * Mirrors of the cooldown rule in friendsAction.mjs — this route only reports
@@ -348,6 +351,84 @@ async function saveWallet(wallet) {
 }
 
 // ─── handler ───────────────────────────────────────────────────────────────
+/**
+ * Where everybody currently holding a socket is, and what they are doing.
+ *
+ * `online` used to be the literal `false` for every friend, because presence
+ * lived in the Express server's memory and a Lambda could not see it. It lives
+ * in the Connections table now, so it can.
+ *
+ * FOUR STATES, and the distinction that matters is the last one:
+ *   offline     no live socket
+ *   online      connected, but no match running in their room — a lobby, or
+ *               a room that has finished
+ *   playing     a match is running and they are IN it
+ *   spectating  a match is running in their room and they are NOT in it,
+ *               which is exactly what a spectator is (see lambda-ws)
+ *
+ * One Scan of Connections rather than a query per friend: the table holds one
+ * row per LIVE SOCKET, so it is a handful of items, and there is no username
+ * index to query anyway. Then one GetItem per DISTINCT lobby — friends tend to
+ * be in the same room, so that collapses further.
+ *
+ * Never throws. Presence is decoration on a friends list; a failure here
+ * degrades everyone to offline rather than failing the request.
+ */
+async function presenceByUsername() {
+  const where = new Map();
+  try {
+    let ExclusiveStartKey;
+    do {
+      const page = await ddb.send(
+        new ScanCommand({
+          TableName: CONNECTIONS_TABLE,
+          ProjectionExpression: "username, lobbyId",
+          ExclusiveStartKey,
+        })
+      );
+      for (const row of page.Items ?? []) {
+        if (row?.username) where.set(String(row.username), row.lobbyId ?? null);
+      }
+      ExclusiveStartKey = page.LastEvaluatedKey;
+    } while (ExclusiveStartKey);
+  } catch (err) {
+    console.error("presence scan failed:", err);
+    return new Map();
+  }
+
+  const lobbyIds = [...new Set([...where.values()].filter(Boolean))].map(String);
+  const matches = new Map();
+  await Promise.all(
+    lobbyIds.map(async (lobbyId) => {
+      try {
+        const res = await ddb.send(
+          new GetCommand({
+            TableName: GAME_STATE_TABLE,
+            Key: { lobbyId },
+            ProjectionExpression: "phase, players",
+          })
+        );
+        if (res.Item) matches.set(lobbyId, res.Item);
+      } catch {
+        // this lobby's status is simply unknown; its members read as online
+      }
+    })
+  );
+
+  const status = new Map();
+  for (const [username, lobbyId] of where) {
+    const state = lobbyId ? matches.get(String(lobbyId)) : null;
+    const running = state && state.phase !== "lobby" && state.phase !== "gameover";
+    if (!running) {
+      status.set(username, "online");
+      continue;
+    }
+    const seated = (state.players ?? []).some((p) => p?.username === username);
+    status.set(username, seated ? "playing" : "spectating");
+  }
+  return status;
+}
+
 export const handler = async (event) => {
   // CORS preflight, when API Gateway is not answering it for us
   if (methodOf(event) === "OPTIONS") {
@@ -362,6 +443,7 @@ export const handler = async (event) => {
 
   try {
     const me = await getWallet(username);
+    const presence = await presenceByUsername();
 
     /*
      * One read per name, and a name can appear in only one of the three
@@ -378,11 +460,14 @@ export const handler = async (event) => {
       Promise.all(
         (me.friends ?? []).map(async (name) => {
           const { w, displayName } = await nameOf(name);
+          const status = presence.get(name) ?? "offline";
           return {
             username: name,
             displayName,
-            // ⚠ always false in Lambda — see the DEGRADED note in the header
-            online: false,
+            status,
+            // kept so a client that predates `status` keeps working; it is
+            // now truthful rather than hardcoded false
+            online: status !== "offline",
             points: w?.points ?? 0,
             currentStreak: w?.currentStreak ?? 0,
             wins: w?.wins ?? 0,
