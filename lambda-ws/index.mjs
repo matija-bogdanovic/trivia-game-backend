@@ -116,6 +116,7 @@ import {
   onSubmitAnswer,
 } from "./lib/handlers/game.mjs";
 import { onJoin } from "./lib/handlers/join.mjs";
+import { onHello, onInviteFriend } from "./lib/handlers/invite.mjs";
 import {
   HOST_ONLY_ACTIONS,
   onKickPlayer,
@@ -185,6 +186,21 @@ async function onDefault(event) {
       break;
     case "leave":
       await onLeave(event, connectionId, row);
+      break;
+    /*
+     * hello — say who you are WITHOUT joining a room.
+     *
+     * Sits beside ping rather than behind the host gate because it is the
+     * thing that runs before any of that: it is how a socket outside a game
+     * becomes attributable, which is what makes a friend reachable by an
+     * invite and what finally makes "online" mean something in the friends
+     * list.
+     */
+    case "hello":
+      await onHello(event, connectionId, msg);
+      break;
+    case "invite_friend":
+      await onInviteFriend(event, connectionId, row, msg);
       break;
     case "ping":
       // plumbing check: works before `join`, and echoes anything sent with it
