@@ -24,6 +24,7 @@ import {
   drawQuestion,
   idsForLanguage,
   sliceForDeck,
+  withShuffledOptions,
 } from "../lambda-ws/lib/questions.mjs";
 import {
   DECK_SLICE_SIZE,
@@ -33,6 +34,12 @@ import {
 
 let pass = 0;
 const failures = [];
+function check_silent(cond, label) {
+  if (cond) return;
+  failures.push(label);
+  console.log(`  FAIL ${label}`);
+}
+
 function check(label, actual, expected) {
   const a = JSON.stringify(actual);
   const e = JSON.stringify(expected);
@@ -57,6 +64,9 @@ function makePool(counts) {
       byId.set(id, {
         id,
         text: `${lang} question ${i}`,
+        // MIRRORS THE REAL TABLE: every stored row is [answer, ...wrong], so
+        // the answer is at index 0. A fixture that pre-shuffled would make the
+        // shuffle tests pass without the shuffle.
         options: ["a", "b", "c", "d"],
         answer: "a",
         difficulty: (i % 3) + 1,
@@ -242,6 +252,53 @@ console.log("\n── sliceForDeck avoids what was already asked ──");
   check("only unasked ids offered", slice.filter((id) => used.includes(id)).length, 0);
   check("offered what remained", slice.length, 50);
   check("nothing left to offer -> empty", sliceForDeck(pool, "en", idsForLanguage(pool, "en")).length, 0);
+}
+
+console.log("\n── OPTIONS ARE SHUFFLED PER DRAW (the answer was always button 1) ──");
+{
+  const pool = makePool({ en: 400 });
+  const state = { language: "en", deck: { fresh: [], used: [] } };
+  const positions = {};
+  let table = 0;
+  for (let i = 0; i < 600; i++) {
+    const q = drawQuestion(state, ((i % 3) + 1), pool);
+    if (String(q.id).startsWith("math-")) continue;
+    table++;
+    const idx = q.options.indexOf(q.answer);
+    positions[idx] = (positions[idx] ?? 0) + 1;
+    if (!q.options.includes(q.answer)) throw new Error("answer lost in shuffle");
+  }
+  check("drew plenty of table questions", table > 200, true);
+  check("answer is NOT always at index 0", (positions[0] ?? 0) < table, true);
+  check("it lands in every slot", Object.keys(positions).sort(), ["0", "1", "2", "3"]);
+  // 4 options, so ~25% each; anything above 40% means it is not really random
+  const share = (positions[0] ?? 0) / table;
+  check("index 0 share looks uniform (<40%)", share < 0.4, true);
+  console.log(`       index-0 share ${(share * 100).toFixed(1)}% across ${table} draws`);
+}
+
+console.log("\n── the shared pool is never mutated by a draw ──");
+{
+  const pool = makePool({ en: 200 });
+  const before = pool.byId.get("en-0").options.join(",");
+  const state = { language: "en", deck: { fresh: [], used: [] } };
+  for (let i = 0; i < 400; i++) drawQuestion(state, 2, pool);
+  check("cached row untouched", pool.byId.get("en-0").options.join(","), before);
+  check("cached answer still first in the CACHE", pool.byId.get("en-0").options[0], "a");
+}
+
+console.log("\n── withShuffledOptions keeps the answer valid ──");
+{
+  const q = { id: "x", options: ["a", "b", "c", "d"], answer: "a", difficulty: 1 };
+  let moved = 0;
+  for (let i = 0; i < 200; i++) {
+    const out = withShuffledOptions(q);
+    check_silent(out.options.includes(out.answer), "answer survives");
+    check_silent(out.options.length === 4, "option count preserved");
+    if (out.options.indexOf(out.answer) !== 0) moved++;
+  }
+  check("answer moves off index 0 most of the time", moved > 100, true);
+  check("original object not mutated", q.options.join(","), "a,b,c,d");
 }
 
 console.log(`\n${"=".repeat(60)}`);

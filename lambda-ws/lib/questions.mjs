@@ -171,6 +171,35 @@ function sliceForDeck(pool, language, used) {
 }
 
 /**
+ * A copy of a pooled question with its options in a fresh random order.
+ *
+ * ── WHY THIS EXISTS, AND WHY IT IS HERE AND NOT IN normalizeQuestion ───────
+ * Every row in the table stores its options as [answer, ...wrong] — the
+ * import built them that way and never shuffled — so the correct answer was
+ * the FIRST option in 100% of rows, and the engine passes options through in
+ * order. Every table question showed its answer as the first button. A player
+ * who noticed would win by always tapping option one.
+ *
+ * The shuffle belongs at DRAW time, not at load. normalizeQuestion runs once
+ * per warm container, so shuffling there would fix the index-0 tell but freeze
+ * one order per question for the life of that container — the same question
+ * would come back in the same arrangement to everyone it was served to, and a
+ * reload mid-question would rebuild the same board. Shuffling per draw makes
+ * the order fresh for every serve.
+ *
+ * A COPY, never in place: `pool.byId` is the module-scope cache shared by every
+ * match on the container, and shuffling the cached object would be a data race
+ * between concurrent matches — and would slowly scramble the pool for
+ * everybody.
+ *
+ * The answer is carried by VALUE, not by index, so a reorder cannot break the
+ * mapping — `options.includes(answer)` holds whatever the order.
+ */
+function withShuffledOptions(question) {
+  return { ...question, options: shuffle(question.options) };
+}
+
+/**
  * Draw for the requested tier. The deck persists as id lists on the state so a
  * match does not repeat a question until the pool is exhausted; the drawn
  * question itself is copied into `turn` so nothing has to be re-resolved.
@@ -220,7 +249,13 @@ function drawQuestion(state, difficulty, pool) {
   if (state.deck.used.length > DECK_USED_LIMIT) {
     state.deck.used = state.deck.used.slice(-DECK_USED_LIMIT);
   }
-  return pool.byId.get(id) ?? generateMathQuestion(difficulty);
+  /*
+   * Generated arithmetic is deliberately NOT sent through
+   * withShuffledOptions: generateMathQuestion already shuffles its own
+   * options when it builds them, and re-shuffling is work for no change.
+   */
+  const drawn = pool.byId.get(id);
+  return drawn ? withShuffledOptions(drawn) : generateMathQuestion(difficulty);
 }
 
 export {
@@ -228,6 +263,7 @@ export {
   generateMathQuestion,
   idsForLanguage,
   sliceForDeck,
+  withShuffledOptions,
   loadQuestionPool,
   normalizeQuestion,
   randInt,
