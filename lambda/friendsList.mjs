@@ -533,14 +533,26 @@ export const handler = async (event) => {
       ]),
     ]);
 
+    /*
+     * Nobody is their own friend, and nobody has asked themselves anything.
+     *
+     * sendFriendRequest already refuses `from === to`, so no live path can
+     * create a self-row — but a row written before that guard existed, or by a
+     * script, or by a future action that forgets, would surface as a request
+     * from yourself that you cannot decline away. Filtering on the way OUT
+     * means the screen cannot show one whatever the item happens to hold.
+     */
+    const notMe = (entry) => entry && entry.username !== username;
+
     return json(event, 200, {
-      friends: friends.sort(
+      friends: friends.filter(notMe).sort(
         (a, b) => Number(b.online) - Number(a.online) || b.points - a.points
       ),
-      requests: incoming,
+      requests: incoming.filter(notMe),
       // pending first, then the denials, newest denial first
       outgoing: outgoing
         .filter(Boolean)
+        .filter(notMe)
         .sort(
           (a, b) =>
             Number(a.status === "denied") - Number(b.status === "denied") ||

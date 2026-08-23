@@ -762,7 +762,21 @@ export const handler = async (event) => {
       return json(event, 400, { message: "target and action required" });
     }
     const me = username;
-    const them = String(target);
+    const them = String(target).trim();
+
+    /*
+     * The self guard, in front of EVERY action rather than inside one.
+     *
+     * sendFriendRequest already refused `from === to`, but the other four did
+     * not: accept/decline/cancel/remove all went straight to commitPair, which
+     * loads the two records and writes them back — and with both names equal
+     * that is the same item read twice and written twice, the second write
+     * silently undoing the first. Nothing good could come of any of them, and
+     * "That's you" is the honest answer to all five.
+     */
+    if (!them || them === me) {
+      return json(event, 400, { message: "That's you" });
+    }
 
     /*
      * Every transition answers with the STATE the friendship is now in, not
