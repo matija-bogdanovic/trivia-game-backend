@@ -155,7 +155,24 @@ async function onJoin(event, connectionId, msg, row) {
   // no per-room chat history is persisted yet, but the client clears its list
   // on this message, so send it and keep the contract honest
   await postTo(event, connectionId, { type: "chat_history", messages: [] });
-  await broadcastLobbyState(event, canonicalId);
+
+  /*
+   * The row we just wrote is handed to the broadcast rather than left to be
+   * rediscovered. connectionsInLobby reads a GSI, GSIs are eventually
+   * consistent, and this is the microsecond after the write — so without this
+   * the joiner is missing from their own join: absent from the presence list
+   * everyone else receives, and absent from the fan-out that would have told
+   * them who is here. See presence.mjs.
+   */
+  await broadcastLobbyState(event, canonicalId, {
+    connectionId,
+    username,
+    displayName,
+    avatar: profile.avatar,
+    streak: profile.streak,
+    joinedAt: Date.now(),
+    lobbyId: canonicalId,
+  });
 
   // RESYNC — a socket joining mid-match is caught up on the spot. Every
   // deadline in the state is absolute, so the phase message below carries the

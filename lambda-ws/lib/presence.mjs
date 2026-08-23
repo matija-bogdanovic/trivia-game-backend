@@ -8,7 +8,7 @@
  */
 
 import { MIN_PLAYERS, capacityOf, startingMoneyOf } from "./config.mjs";
-import { broadcast, connectionsInLobby } from "./connections.mjs";
+import { postTo, broadcast, connectionsInLobby } from "./connections.mjs";
 import { resolveLobby } from "./lobbies.mjs";
 import { readGameState } from "./state.mjs";
 
@@ -39,9 +39,34 @@ import { readGameState } from "./state.mjs";
  * stale reasoning, which meant a player who had been knocked out still read
  * as alive in lobby_state.
  */
-async function lobbyStateMessage(lobby, lobbyId) {
+/**
+ * @param justJoined a connection row that MUST be treated as present even if
+ *   the lobby-index has not caught up with it yet — see the note on
+ *   broadcastLobbyState.
+ */
+async function lobbyStateMessage(lobby, lobbyId, justJoined = null) {
   const startingMoney = startingMoneyOf(lobby);
-  const live = await connectionsInLobby(lobbyId);
+  const indexed = await connectionsInLobby(lobbyId);
+
+  /*
+   * ── WHY A ROW IS HANDED IN RATHER THAN LOOKED UP ─────────────────────────
+   * connectionsInLobby reads the lobby-index GSI, and a GSI is EVENTUALLY
+   * CONSISTENT — DynamoDB does not offer ConsistentRead on one. `join` writes
+   * the connection row and queries that index microseconds later, which is
+   * exactly the window where the write has not propagated.
+   *
+   * So the joiner was routinely absent from their own join: missing from
+   * `live`, which made their seat render connected:false to everybody else,
+   * and missing from the fan-out list, so they received nothing at all. Both
+   * halves of "the seats do not update when somebody joins".
+   *
+   * The caller already HAS the row it just wrote. Merging it in is the fix,
+   * and it costs nothing when the index is current — the dedup below keeps
+   * the newest of the two copies.
+   */
+  const live = justJoined
+    ? [...indexed.filter((r) => r.connectionId !== justJoined.connectionId), justJoined]
+    : indexed;
 
   /*
    * A finished match leaves its state behind so the results screen survives a
@@ -138,10 +163,26 @@ async function lobbyStateMessage(lobby, lobbyId) {
   };
 }
 
-/** rebuild presence and push it to everyone still in the lobby */
-async function broadcastLobbyState(event, lobbyId) {
+/**
+ * Rebuild presence and push it to everyone still in the lobby.
+ *
+ * `justJoined` is the connection row the caller has just written. It is used
+ * twice: once so the message DESCRIBES that player as present, and once so the
+ * message REACHES them — broadcast() fans out over the same eventually
+ * consistent index, so a socket the GSI has not seen yet would otherwise be
+ * skipped by its own join.
+ *
+ * postTo is called separately for it, and broadcast is told to skip it, so
+ * nobody receives the state twice.
+ */
+async function broadcastLobbyState(event, lobbyId, justJoined = null) {
   const lobby = await resolveLobby(lobbyId);
-  const message = await lobbyStateMessage(lobby, lobbyId);
+  const message = await lobbyStateMessage(lobby, lobbyId, justJoined);
+  if (justJoined?.connectionId) {
+    await postTo(event, justJoined.connectionId, message);
+    await broadcast(event, lobbyId, message, justJoined.connectionId);
+    return;
+  }
   await broadcast(event, lobbyId, message);
 }
 
