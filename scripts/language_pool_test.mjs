@@ -23,12 +23,15 @@
 import {
   drawQuestion,
   idsForLanguage,
+  idsForMatch,
+  categoryFilter,
   sliceForDeck,
   withShuffledOptions,
 } from "../lambda-ws/lib/questions.mjs";
 import {
   DECK_SLICE_SIZE,
   DECK_USED_LIMIT,
+  MIN_CATEGORY_POOL,
   MIN_LANGUAGE_POOL,
 } from "../lambda-ws/lib/config.mjs";
 
@@ -53,7 +56,9 @@ function check(label, actual, expected) {
 }
 
 /** a pool of `n` questions per language, difficulty spread across 1..3 */
-function makePool(counts) {
+const CATS = ["History", "Geography", "Science", "Music"];
+
+function makePool(counts, catCounts = null) {
   const byId = new Map();
   const idsByLang = new Map();
   const ids = [];
@@ -71,6 +76,10 @@ function makePool(counts) {
         answer: "a",
         difficulty: (i % 3) + 1,
         language: lang,
+        // either a fixed spread across CATS, or an explicit per-category count
+        category: catCounts
+          ? catCountCategory(catCounts, i)
+          : CATS[i % CATS.length],
       });
       list.push(id);
       ids.push(id);
@@ -81,6 +90,17 @@ function makePool(counts) {
 }
 
 const langOf = (pool, q) => pool.byId.get(q.id)?.language ?? "(generated)";
+const catOf = (pool, q) => pool.byId.get(q.id)?.category ?? null;
+
+/** places question `i` into the first category whose quota is not yet spent */
+function catCountCategory(catCounts, i) {
+  let seen = 0;
+  for (const [cat, n] of Object.entries(catCounts)) {
+    if (i < seen + n) return cat;
+    seen += n;
+  }
+  return "Other";
+}
 
 console.log(`\nMIN_LANGUAGE_POOL = ${MIN_LANGUAGE_POOL}\n`);
 
@@ -248,10 +268,10 @@ console.log("\n── sliceForDeck avoids what was already asked ──");
 {
   const pool = makePool({ en: 300 });
   const used = idsForLanguage(pool, "en").slice(0, 250);
-  const slice = sliceForDeck(pool, "en", used);
+  const slice = sliceForDeck(pool, "en", [], used);
   check("only unasked ids offered", slice.filter((id) => used.includes(id)).length, 0);
   check("offered what remained", slice.length, 50);
-  check("nothing left to offer -> empty", sliceForDeck(pool, "en", idsForLanguage(pool, "en")).length, 0);
+  check("nothing left to offer -> empty", sliceForDeck(pool, "en", [], idsForLanguage(pool, "en")).length, 0);
 }
 
 console.log("\n── OPTIONS ARE SHUFFLED PER DRAW (the answer was always button 1) ──");
@@ -299,6 +319,98 @@ console.log("\n── withShuffledOptions keeps the answer valid ──");
   }
   check("answer moves off index 0 most of the time", moved > 100, true);
   check("original object not mutated", q.options.join(","), "a,b,c,d");
+}
+
+console.log("\n── categoryFilter: what counts as \"no filter\" ──");
+{
+  check("undefined", categoryFilter(undefined), null);
+  check("empty array", categoryFilter([]), null);
+  check("legacy Mixed sentinel", categoryFilter(["Mixed"]), null);
+  check("All sentinel", categoryFilter(["All"]), null);
+  check("blank strings", categoryFilter(["", "  "]), null);
+  check("a real pick", [...(categoryFilter(["History"]) ?? [])], ["History"]);
+  check("sentinel mixed with a real pick keeps the pick",
+    [...(categoryFilter(["Mixed", "History"]) ?? [])], ["History"]);
+}
+
+console.log("\n── a match draws ONLY the chosen categories ──");
+{
+  const pool = makePool({ en: 800 });
+  const state = { language: "en", categories: ["History"], deck: { fresh: [], used: [] } };
+  const seen = new Set();
+  let table = 0;
+  for (let i = 0; i < 400; i++) {
+    const q = drawQuestion(state, ((i % 3) + 1), pool);
+    if (String(q.id).startsWith("math-")) continue;
+    table++;
+    seen.add(catOf(pool, q));
+  }
+  check("drew table questions", table > 100, true);
+  check("only History", [...seen], ["History"]);
+}
+
+console.log("\n── two categories, and nothing outside them ──");
+{
+  const pool = makePool({ en: 800 });
+  const state = { language: "en", categories: ["History", "Science"], deck: { fresh: [], used: [] } };
+  const seen = new Set();
+  for (let i = 0; i < 400; i++) {
+    const q = drawQuestion(state, 2, pool);
+    if (!String(q.id).startsWith("math-")) seen.add(catOf(pool, q));
+  }
+  check("both appear", [...seen].sort(), ["History", "Science"]);
+}
+
+console.log("\n── category + language TOGETHER ──");
+{
+  const pool = makePool({ en: 600, sr: 600 });
+  const state = { language: "sr", categories: ["Geography"], deck: { fresh: [], used: [] } };
+  const langs = new Set(), cats = new Set();
+  for (let i = 0; i < 300; i++) {
+    const q = drawQuestion(state, 2, pool);
+    if (String(q.id).startsWith("math-")) continue;
+    langs.add(langOf(pool, q)); cats.add(catOf(pool, q));
+  }
+  check("language honoured", [...langs], ["sr"]);
+  check("category honoured", [...cats], ["Geography"]);
+}
+
+console.log("\n── FALLBACK: a category too thin gives way, the language does NOT ──");
+{
+  // Tiny holds fewer than MIN_CATEGORY_POOL, so the category filter is dropped
+  const pool = makePool({ sr: 400 }, { Tiny: MIN_CATEGORY_POOL - 1, Big: 401 - MIN_CATEGORY_POOL });
+  check("sr pool is big enough to keep", (pool.idsByLang.get("sr") ?? []).length >= MIN_LANGUAGE_POOL, true);
+  const narrowed = idsForMatch(pool, "sr", ["Tiny"]);
+  check("fell back to the whole sr pool", narrowed.length, 400);
+
+  const state = { language: "sr", categories: ["Tiny"], deck: { fresh: [], used: [] } };
+  const langs = new Set(), cats = new Set();
+  for (let i = 0; i < 300; i++) {
+    const q = drawQuestion(state, 2, pool);
+    if (String(q.id).startsWith("math-")) continue;
+    langs.add(langOf(pool, q)); cats.add(catOf(pool, q));
+  }
+  check("STILL only sr — language never gives way", [...langs], ["sr"]);
+  check("but categories widened", cats.size > 1, true);
+}
+
+console.log("\n── a category exactly at the threshold is kept ──");
+{
+  const pool = makePool({ en: 400 }, { Exact: MIN_CATEGORY_POOL, Rest: 400 - MIN_CATEGORY_POOL });
+  check("kept at the threshold", idsForMatch(pool, "en", ["Exact"]).length, MIN_CATEGORY_POOL);
+  const under = makePool({ en: 400 }, { Exact: MIN_CATEGORY_POOL - 1, Rest: 401 - MIN_CATEGORY_POOL });
+  check("dropped one below it", idsForMatch(under, "en", ["Exact"]).length, 400);
+}
+
+console.log("\n── generated arithmetic still appears with categories chosen ──");
+{
+  const pool = makePool({ en: 800 });
+  const state = { language: "en", categories: ["History"], deck: { fresh: [], used: [] } };
+  let math = 0;
+  for (let i = 0; i < 500; i++) {
+    if (String(drawQuestion(state, 2, pool).id).startsWith("math-")) math++;
+  }
+  check("arithmetic is unaffected by the category choice", math > 50, true);
 }
 
 console.log(`\n${"=".repeat(60)}`);

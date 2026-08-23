@@ -393,12 +393,22 @@ function scryptVerify(password, stored) {
 }
 
 // ─── question categories ───────────────────────────────────────────────────
-const DEFAULT_CATEGORIES = ["Mixed"];
-const MAX_CATEGORIES = 12;
+/**
+ * An EMPTY list means every category, and is the default.
+ *
+ * It used to be ["Mixed"], from before the question bank had real categories —
+ * a sentinel that named no category and matched nothing. Empty says the same
+ * thing without pretending to be a value, and the engine reads both alike so
+ * rooms created under the old default still work.
+ */
+const DEFAULT_CATEGORIES = [];
+
+/** the question bank has 24; the cap is headroom, not a limit anyone meets */
+const MAX_CATEGORIES = 32;
 
 /**
  * Normalises the `categories` field off the request body.
- *   missing / null / empty  -> ["Mixed"]
+ *   missing / null / empty  -> [] (every category)
  *   array of strings        -> trimmed, de-duplicated, capped
  *   anything else           -> null, which the caller turns into a 400
  */
@@ -410,7 +420,7 @@ function normalizeCategories(raw) {
     0,
     MAX_CATEGORIES
   );
-  return cleaned.length ? cleaned : DEFAULT_CATEGORIES;
+  return cleaned;
 }
 
 // ─── room capacity ─────────────────────────────────────────────────────────

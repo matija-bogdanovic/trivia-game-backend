@@ -200,6 +200,18 @@ function initialGameState(lobby, lobbyId, connRows) {
      */
     language: matchLanguage(players, live),
 
+    /*
+     * The categories the HOST chose at room creation, carried onto the match
+     * so the deck can honour them. Copied off the lobby rather than re-read
+     * later: the room record can be edited or deleted while a match runs, and
+     * the questions a game draws from should not change under it.
+     *
+     * An empty array means every category — see categoryFilter().
+     */
+    categories: Array.isArray(lobby?.categories)
+      ? lobby.categories.filter((c) => typeof c === "string" && c.trim()).map((c) => c.trim())
+      : [],
+
     deck: { fresh: [], used: [] },
     chat: [],
 
@@ -217,6 +229,7 @@ function publicGameState(s) {
     matchId: s.matchId,
     phase: s.phase,
     language: s.language ?? "en",
+    categories: s.categories ?? [],
     phaseEndsAt: s.phaseEndsAt,
     round: s.round,
     chainDepth: s.chainDepth,

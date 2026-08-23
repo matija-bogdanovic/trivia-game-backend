@@ -137,6 +137,27 @@ const SUPPORTED_LANGUAGES = ["en", "sr"];
 const MIN_LANGUAGE_POOL = 40;
 
 /**
+ * The same idea for the host's chosen CATEGORIES, at a lower bar.
+ *
+ * Deliberately smaller than MIN_LANGUAGE_POOL, because the two preferences are
+ * not equally negotiable. A player who set the app to Serbian cannot read an
+ * English question at all — language is a hard requirement. A category is a
+ * taste, and it was chosen ON PURPOSE by the host, so it is worth honouring
+ * even where the pool is thin enough to repeat late in a long match.
+ *
+ * 20 also happens to keep every one of the 24 OpenTDB categories usable on its
+ * own; the smallest, Musicals & Theatres, holds 36.
+ */
+const MIN_CATEGORY_POOL = 20;
+
+/**
+ * Category values that mean "no filter" rather than naming a category.
+ * "Mixed" is what createRoom defaulted to before the real 24-category
+ * vocabulary existed, and rooms created then still carry it.
+ */
+const ALL_CATEGORIES = ["Mixed", "All"];
+
+/**
  * How many question ids a match holds in its deck at once.
  *
  * THE WHOLE POOL DOES NOT GO IN THE RECORD. The GameState item is rewritten
@@ -257,6 +278,8 @@ export {
   DECK_USED_LIMIT,
   DEFAULT_LANGUAGE,
   MATH_QUESTION_CHANCE,
+  ALL_CATEGORIES,
+  MIN_CATEGORY_POOL,
   MIN_LANGUAGE_POOL,
   SUPPORTED_LANGUAGES,
   MAX_PLAYERS,

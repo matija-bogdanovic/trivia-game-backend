@@ -10,10 +10,12 @@
 import { ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { ddb } from "./aws.mjs";
 import {
+  ALL_CATEGORIES,
   DECK_SLICE_SIZE,
   DECK_USED_LIMIT,
   DEFAULT_LANGUAGE,
   MATH_QUESTION_CHANCE,
+  MIN_CATEGORY_POOL,
   MIN_LANGUAGE_POOL,
   QUESTIONS_TABLE,
 } from "./config.mjs";
@@ -93,6 +95,13 @@ function normalizeQuestion(raw, fallbackId) {
     language: typeof raw.language === "string" && raw.language
       ? raw.language
       : DEFAULT_LANGUAGE,
+    /*
+     * KEPT, not dropped. This field was read off the row and thrown away here,
+     * which is why the host's category choice could not be honoured however
+     * carefully it was stored — the engine simply never saw what a question
+     * was about. null means the row predates the categorised import.
+     */
+    category: typeof raw.category === "string" && raw.category ? raw.category : null,
   };
 }
 
@@ -144,6 +153,49 @@ async function loadQuestionPool() {
  * than Serbian at a tenth of it, and step 3 exists only so a misconfigured
  * table still deals cards instead of dropping to pure arithmetic.
  */
+/**
+ * The host's chosen categories as a lookup, or null for "no filter".
+ *
+ * An empty list, a missing one, and the legacy sentinels ("Mixed", "All") all
+ * mean the same thing: every category. Treating them alike is what lets rooms
+ * created before the real vocabulary existed keep working unchanged.
+ */
+function categoryFilter(categories) {
+  if (!Array.isArray(categories) || !categories.length) return null;
+  const wanted = categories
+    .filter((c) => typeof c === "string" && c.trim())
+    .map((c) => c.trim())
+    .filter((c) => !ALL_CATEGORIES.includes(c));
+  if (!wanted.length) return null;
+  return new Set(wanted);
+}
+
+/**
+ * The ids a match may draw from, honouring BOTH the language and the host's
+ * categories — and the order in which each is given up.
+ *
+ * THE RULE, in order:
+ *   1. this language AND these categories, if that holds MIN_CATEGORY_POOL
+ *   2. this language, ALL categories, if that holds MIN_LANGUAGE_POOL
+ *   3. DEFAULT_LANGUAGE, all categories, on the same test
+ *   4. everything there is
+ *
+ * The category filter is dropped BEFORE the language filter, and that ordering
+ * is the whole design. Someone reading the app in Serbian cannot play an
+ * English question at all, while a host who picked History can still play a
+ * Geography one — so when the two cannot both be satisfied, the one that
+ * merely disappoints gives way to the one that would break the game.
+ */
+function idsForMatch(pool, language, categories) {
+  const wanted = categoryFilter(categories);
+  if (wanted) {
+    const langIds = pool.idsByLang?.get(language) ?? [];
+    const narrowed = langIds.filter((id) => wanted.has(pool.byId.get(id)?.category));
+    if (narrowed.length >= MIN_CATEGORY_POOL) return narrowed;
+  }
+  return idsForLanguage(pool, language);
+}
+
 function idsForLanguage(pool, language) {
   const wanted = pool.idsByLang?.get(language) ?? [];
   if (wanted.length >= MIN_LANGUAGE_POOL) return wanted;
@@ -163,9 +215,9 @@ function idsForLanguage(pool, language) {
  * Returns [] when every question in the language has been asked, which is the
  * caller's signal to start the pool over.
  */
-function sliceForDeck(pool, language, used) {
+function sliceForDeck(pool, language, categories, used) {
   const spent = new Set(used ?? []);
-  const available = idsForLanguage(pool, language).filter((id) => !spent.has(id));
+  const available = idsForMatch(pool, language, categories).filter((id) => !spent.has(id));
   if (!available.length) return [];
   return shuffle(available).slice(0, DECK_SLICE_SIZE);
 }
@@ -224,13 +276,14 @@ function drawQuestion(state, difficulty, pool) {
    * everything. `deckLanguage` is stamped alongside for diagnosis.
    */
   const language = state.language || DEFAULT_LANGUAGE;
+  const categories = state.categories;
   if (!state.deck.fresh.length) {
-    let slice = sliceForDeck(pool, language, state.deck.used);
+    let slice = sliceForDeck(pool, language, categories, state.deck.used);
     if (!slice.length) {
-      // every question in this language has been asked — start the pool over
+      // everything this match may draw has been asked — start the pool over
       // rather than dropping the rest of the match to arithmetic
       state.deck.used = [];
-      slice = sliceForDeck(pool, language, []);
+      slice = sliceForDeck(pool, language, categories, []);
     }
     state.deck.fresh = slice;
     state.deck.deckLanguage = language;
@@ -262,6 +315,8 @@ export {
   drawQuestion,
   generateMathQuestion,
   idsForLanguage,
+  idsForMatch,
+  categoryFilter,
   sliceForDeck,
   withShuffledOptions,
   loadQuestionPool,
