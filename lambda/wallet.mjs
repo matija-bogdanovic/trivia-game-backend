@@ -418,7 +418,33 @@ export const handler = async (event) => {
   }
 
   try {
-    const wallet = await getWallet(username);
+    /*
+     * ── THE ROW IS WRITTEN HERE, OR IT IS NEVER WRITTEN AT ALL ─────────────
+     *
+     * There is no signup Lambda: an account is created in Cognito by the
+     * client, and nothing server-side hears about it. This route is the first
+     * thing a signed-in app calls, so it is the only place a Players row can
+     * come into existence.
+     *
+     * It did not create one. getWallet() INVENTS a fresh wallet when the item
+     * is missing and returns it, and the two saveWallet() calls below are both
+     * conditional — one on adopting a Google picture, one on a display name
+     * that differs. A plain email-and-password signup sends neither, so the
+     * invented row was serialised into the response and thrown away, every
+     * single time.
+     *
+     * The effect was a person who had signed up, could sign in, and did not
+     * exist: no leaderboard entry, nothing for a friend request to find, no
+     * avatar to store. The accounts that DO have rows all got them some other
+     * way — playing a match writes one from createRoom/joinRoom, and a Google
+     * sign-in sends a display name, which is why the federated accounts and
+     * the ones with games behind them are the only rows in the table.
+     *
+     * So: if it was not there, persist it now, before anything conditional.
+     */
+    const existing = await getWalletIfExists(username);
+    const wallet = existing ?? withDefaults(freshWallet(username));
+    if (!existing) await saveWallet(wallet);
 
     /*
      * A Google picture, adopted ONLY when there is nothing to lose.
