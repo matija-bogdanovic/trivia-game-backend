@@ -233,6 +233,64 @@ async function queryByKey(tableName, keyName, keyValue, indexName) {
   return res.Items ?? [];
 }
 
+// ─── host succession ───────────────────────────────────────────────────
+// A COPY of lambda-ws/lib/succession.mjs. The two functions deploy as
+// separate zips with no shared package, and this is the same duplication
+// the token verification in every handler here already lives with. If one
+// changes, change both — scripts/succession_test.mjs covers the original
+// and scripts/succession_parity_test.mjs checks they have not drifted.
+function heirOf(players, leaving) {
+  const remaining = (Array.isArray(players) ? players : [])
+    .map((seat, index) => ({ seat, index }))
+    .filter(({ seat }) => String(seat?.player) !== String(leaving));
+
+  if (remaining.length === 0) return null;
+
+  remaining.sort((a, b) => {
+    const at = Number(a.seat?.joinedAt);
+    const bt = Number(b.seat?.joinedAt);
+    const aHas = Number.isFinite(at);
+    const bHas = Number.isFinite(bt);
+    // a seat with a timestamp always outranks one without: the missing ones
+    // are older rows, and guessing their position against a real clock would
+    // be comparing two different things
+    if (aHas && bHas) return at - bt || a.index - b.index;
+    if (aHas) return -1;
+    if (bHas) return 1;
+    return a.index - b.index;
+  });
+
+  return remaining[0].seat;
+}
+
+/**
+ * The roster as it should be after `leaving` goes: their seat removed, and the
+ * heir promoted to Admin.
+ *
+ * Returns null when the room should be closed instead. Every other seat is
+ * copied through untouched — points, id and joinedAt all survive, because a
+ * change of host is not a change of anybody's standing.
+ */
+function rosterAfterLeaving(players, leaving) {
+  const heir = heirOf(players, leaving);
+  if (!heir) return null;
+
+  return (Array.isArray(players) ? players : [])
+    .filter((seat) => String(seat?.player) !== String(leaving))
+    .map((seat) =>
+      String(seat?.player) === String(heir.player)
+        ? { ...seat, role: "Admin" }
+        : // anyone who was Admin and is not the heir is demoted. That can only
+          // happen to a roster that already held two, which nothing writes —
+          // but a succession function that can produce two hosts is worse than
+          // one line guarding against it
+          seat?.role === "Admin"
+          ? { ...seat, role: "Member" }
+          : seat
+    );
+}
+
+
 // ─── handler ───────────────────────────────────────────────────────────────
 export const handler = async (event) => {
   // CORS preflight, when API Gateway is not answering it for us
@@ -280,17 +338,50 @@ export const handler = async (event) => {
     // already-deleted item succeeds, and the broadcast reads Connections, not
     // Lobbies.
     if (isAdmin) {
+      /*
+       * The host leaving hands the room on rather than deleting it — the same
+       * rule the WebSocket handler applies, and it has to be the same here or
+       * the two paths would disagree about whether a room still exists.
+       *
+       * The heir is the longest-present remaining player, by the joinedAt on
+       * each seat. Only an empty room is deleted.
+       *
+       * This route cannot tell anybody: posting to a WebSocket connection
+       * needs execute-api:ManageConnections on the other API. The WS `leave`
+       * broadcasts the new state, and the frontend sends both.
+       */
+      const roster = rosterAfterLeaving(room.players, username);
+
+      if (!roster) {
+        await ddb.send(
+          new DeleteCommand({
+            TableName: LOBBIES_TABLE,
+            Key: { lobby_id: String(room.lobby_id) },
+          })
+        );
+        return json(event, 200, {
+          message: "Room closed",
+          player: username,
+          roomClosed: true,
+          reason: "host_left",
+        });
+      }
+
+      const heir = roster.find((seat) => seat.role === "Admin");
       await ddb.send(
-        new DeleteCommand({
+        new UpdateCommand({
           TableName: LOBBIES_TABLE,
           Key: { lobby_id: String(room.lobby_id) },
+          UpdateExpression: "SET players = :p, #own = :o",
+          ExpressionAttributeNames: { "#own": "owner" },
+          ExpressionAttributeValues: { ":p": roster, ":o": String(heir.player) },
         })
       );
       return json(event, 200, {
-        message: "Room closed",
+        message: "Host left; room handed over",
         player: username,
-        roomClosed: true,
-        reason: "host_left",
+        roomClosed: false,
+        newHost: String(heir.player),
       });
     }
 

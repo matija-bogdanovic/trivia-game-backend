@@ -24,6 +24,7 @@ import { resolveLobby } from "../lobbies.mjs";
 import { broadcastPhase, systemChat } from "../messages.mjs";
 import { enterGameOver, markEliminated } from "../phases.mjs";
 import { broadcastLobbyState } from "../presence.mjs";
+import { rosterAfterLeaving } from "../succession.mjs";
 import { rearmPhaseTimer } from "../scheduler.mjs";
 import { mutateGameState, readGameState } from "../state.mjs";
 import { livingPlayers } from "../turn.mjs";
@@ -182,8 +183,72 @@ async function onLeave(event, connectionId, row) {
   const lobbyId = row.lobbyId;
 
   const lobby = await resolveLobby(lobbyId);
+
+  /*
+   * ── THE ROOM OUTLIVES ITS HOST NOW ───────────────────────────────────────
+   * This used to closeRoom() and be done: the room died with whoever made it,
+   * so four people in a lobby lost their game because the fifth closed a tab.
+   *
+   * The longest-present player left inherits it instead — see succession.mjs
+   * for why sorting on joinedAt is safe where the old render-time
+   * reassignHost was not. `owner` moves with the Admin seat, so the field and
+   * the roster cannot drift apart.
+   *
+   * Closing is still what happens when the LAST person leaves, and
+   * terminate_lobby is untouched: ending the room deliberately is a different
+   * act from walking out of it.
+   */
   if (await isHostOf(lobby, row.username)) {
-    await closeRoom(event, lobbyId, "host_left");
+    const roster = rosterAfterLeaving(lobby?.players, row.username);
+    if (!roster) {
+      await closeRoom(event, lobbyId, "host_left");
+      return;
+    }
+
+    const heir = roster.find((seat) => seat.role === "Admin");
+    await ddb.send(
+      new UpdateCommand({
+        TableName: LOBBIES_TABLE,
+        Key: { lobby_id: String(lobby.lobby_id) },
+        UpdateExpression: "SET players = :p, #own = :o",
+        ExpressionAttributeNames: { "#own": "owner" },
+        ExpressionAttributeValues: { ":p": roster, ":o": String(heir.player) },
+      })
+    );
+
+    await ddb.send(
+      new UpdateCommand({
+        TableName: CONNECTIONS_TABLE,
+        Key: { connectionId },
+        UpdateExpression:
+          "SET #expiresAt = :e REMOVE #lobbyId, #username, #displayName",
+        ExpressionAttributeNames: {
+          "#expiresAt": "expiresAt",
+          "#lobbyId": "lobbyId",
+          "#username": "username",
+          "#displayName": "displayName",
+        },
+        ExpressionAttributeValues: { ":e": ttlFromNow() },
+      })
+    );
+
+    /*
+     * Two sentences, because two things happened and the room should hear
+     * both: somebody left, and somebody else is now in charge of starting.
+     */
+    await systemChat(
+      event,
+      lobbyId,
+      `${row.displayName || row.username} left the room`,
+      "left"
+    );
+    await systemChat(
+      event,
+      lobbyId,
+      `${heir.displayName || heir.player} is the host now`,
+      "host_changed"
+    );
+    await broadcastLobbyState(event, lobbyId);
     return;
   }
   /*

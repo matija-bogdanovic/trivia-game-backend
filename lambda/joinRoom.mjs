@@ -384,8 +384,19 @@ export const handler = async (event) => {
         ExpressionAttributeValues: {
           ":newPlayerList": [
             {
-              id: String(id),
+              // the verified username, as in createRoom — `id` used to be the
+              // value the client put in the body, beside a `player` taken from
+              // the token. Nothing reads it; nothing should be able to forge it
+              // either.
+              id: username,
               player: username,
+              /*
+               * When this seat was taken. This is what decides who inherits
+               * the room if the host walks out: the longest-present player
+               * left, which is the fairest answer available and the only one
+               * that does not need a vote.
+               */
+              joinedAt: Date.now(),
               // the room's own starting stake, not a hardcoded 500 — otherwise
               // a joiner shows a different bankroll in the lobby from the host
               // who created it. Rooms written before the setting existed have

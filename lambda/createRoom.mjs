@@ -591,6 +591,14 @@ export const handler = async (event) => {
               player: username,
               role: "Admin",
               points: Number(roomStartingMoney),
+              /*
+               * When this seat was taken, so succession has something to sort
+               * by. The host is by definition the first, but writing it here
+               * anyway keeps every seat the same shape — a comparator that has
+               * to special-case one entry is a comparator that will eventually
+               * get that case wrong.
+               */
+              joinedAt: Date.now(),
             },
           ],
           // no rounds array — games always run until one player has money
