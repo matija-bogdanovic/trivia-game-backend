@@ -137,31 +137,53 @@ const COUNTDOWN_MS = 3000;      // room.ts ticks 3,2,1,0 then spins at t=3s
  */
 const ROUND_INTRO_MS = 2500;
 const SPIN_TIME_MS = 5000;
-const BASE_QUESTION_TIME_MS = 15000;
-const MIN_QUESTION_TIME_MS = 8000;
+/*
+ * ANSWERING A QUESTION, and the floor the chain ramps down to.
+ *
+ * The floor matters more than the ceiling here, and it was backwards: a
+ * question gets HARDER as the chain deepens — the difficulty tier rises every
+ * two links, and a picked one adds another on top — while the clock ran the
+ * other way, down to eight seconds. The hardest questions in a match were on
+ * the shortest clock. Ten is the floor now, and the ceiling rises with it so
+ * the ramp keeps the same shape rather than flattening.
+ */
+const BASE_QUESTION_TIME_MS = 18000;
+const MIN_QUESTION_TIME_MS = 10000;
 /*
  * THE BETTING PAUSE.
  *
- * Was 4500. The book is open from the moment the question appears, so on paper
- * a bettor had the whole question clock as well — but the panel only counts
- * down during this pause, and an answerer who buzzes in two seconds collapses
- * the entire window to these milliseconds. Four and a half seconds is not
- * enough to read the odds, type a figure and choose a side; Matija's report was
- * that the clock ran out while he was still setting the amount.
+ * Was 4500, then 8000. The book is open from the moment the question appears,
+ * so on paper a bettor has the whole question clock as well — but an answerer
+ * who buzzes in two seconds collapses the entire window to this pause. It has
+ * to be long enough on its own to read the odds, type a figure and choose a
+ * side, because that is regularly all there is.
  *
- * Eight seconds is a pause, not a scramble. It is still short enough that a
- * table where everyone has already decided ends it early — pendingBettors()
- * closes the phase the moment the last declaration lands, so the extra time is
- * only ever spent by someone actually using it.
+ * Ten seconds costs nothing when nobody needs it: pendingBettors() ends the
+ * phase the moment the last declaration lands, so the extra time is only ever
+ * spent by someone actually using it.
  */
-const BETTING_TIME_MS = 8000;
-const REVEAL_MS = 5000;
+const BETTING_TIME_MS = 10000;
 /*
- * Was 15000, for a screen that asks FOUR questions: who, which mode, which
- * side, and how much. The wager is optional, but sizing one meant doing it
- * against the same clock that has to cover choosing a target at all.
+ * THE REVEAL — and this was the tightest clock in the game.
+ *
+ * Five seconds was set when this screen said one thing: right or wrong. It now
+ * carries the verdict, the correct answer, every bettor's settlement with the
+ * price they took, the pot, what the turn had to mint, and who went out — and
+ * a duel reveals two race times to the hundredth on top of that. Nobody reads
+ * their own winnings in five seconds while also reading whether they survived.
+ *
+ * It costs nothing but length: reveal is pure display, and no one is waiting
+ * on an input.
  */
-const PICK_TIME_MS = 20000;
+const REVEAL_MS = 8000;
+/*
+ * Was 15000, then 20000, for a screen that asks FOUR questions: who, which
+ * mode, which side, and how much. The wager is optional, but sizing one meant
+ * doing it against the same clock that has to cover choosing a target at all —
+ * and a picker who runs out gets a RANDOM target with no wager, which is the
+ * worst outcome on the screen and was reachable just by thinking.
+ */
+const PICK_TIME_MS = 25000;
 const DUEL_TIME_MS = 20000;
 const CODE_DUEL_TIME_MS = 90000;
 
