@@ -226,28 +226,48 @@ async function onPlaceBet(event, connectionId, row, msg) {
     return;
   }
   let closedEarly = false;
+  /*
+   * WHY THE REFUSAL IS NAMED NOW.
+   *
+   * Every branch below used to `return null`, and the caller answered that
+   * with `if (!res.ok) return;` — nothing at all went back to the sender. The
+   * client, meanwhile, writes myBet optimistically the instant the button is
+   * pressed. So a bet the server threw away still read as PLACED on the
+   * screen of the person who made it: no money left their wallet, nothing
+   * settled at reveal, and the panel sat there claiming a stake that did not
+   * exist. Missing the deadline by a few hundred milliseconds is the ordinary
+   * way to hit this, and the clock the client is watching is its own.
+   */
+  let refusal = null;
+  /** what was actually accepted — the clamped figure, not the one requested */
+  let placed = null;
 
   const res = await mutateGameState(row.lobbyId, (s) => {
-    if (s.phase !== "question" && s.phase !== "betting") return null;
-    if (!s.turn) return null;
+    refusal = null;
+    placed = null;
+
+    if (s.phase !== "question" && s.phase !== "betting") { refusal = "not-open"; return null; }
+    if (!s.turn) { refusal = "not-open"; return null; }
     // (a) a CHALLENGE's only bet is the picker's, and it was committed at pick
     // time — the book is closed to everyone, picker included. A DUEL takes no
     // side bets at all: its only stakes are the two antes.
-    if (s.turn.mode === "challenge") return null;
-    if (nowMs() > Number(s.phaseEndsAt ?? 0)) return null; // past the deadline
-    if (!["correct", "wrong", "neutral"].includes(side)) return null;
-    if (s.turn.answering === row.username) return null;    // can't bet on yourself
+    if (s.turn.mode === "challenge") { refusal = "challenge"; return null; }
+    if (nowMs() > Number(s.phaseEndsAt ?? 0)) { refusal = "too-late"; return null; }
+    if (!["correct", "wrong", "neutral"].includes(side)) { refusal = "bad-side"; return null; }
+    if (s.turn.answering === row.username) { refusal = "self"; return null; }
 
     s.bets = s.bets ?? [];
-    if (s.bets.some((b) => b.username === row.username)) return null; // already declared
+    if (s.bets.some((b) => b.username === row.username)) { refusal = "already"; return null; }
 
     const player = (s.players ?? []).find((p) => p.username === row.username);
-    if (!player || !player.alive) return null;
+    if (!player) { refusal = "not-playing"; return null; }
+    if (!player.alive) { refusal = "eliminated"; return null; }
 
     if (side === "neutral") {
       s.bets.push({ username: row.username, side: "neutral", amount: 0, quota: 0 });
+      placed = { side: "neutral", amount: 0, quota: 0 };
     } else {
-      if (player.money < MIN_BET) return null;
+      if (player.money < MIN_BET) { refusal = "too-poor"; return null; }
       const allIn = msg.amount === "all" || msg.allIn === true;
       const raw = allIn ? player.money : Math.floor(Number(msg.amount) || 0);
       const amount = Math.min(player.money, Math.max(MIN_BET, raw));
@@ -255,6 +275,13 @@ async function onPlaceBet(event, connectionId, row, msg) {
       player.money -= amount;                          // out of the pocket…
       s.pot = Number(s.pot ?? 0) + amount;             // …and into the pot
       s.bets.push({ username: row.username, side, amount, quota });
+      /*
+       * The CLAMPED amount, which is not always the requested one: a stake is
+       * floored at MIN_BET and capped at the bettor's own bankroll. Asking for
+       * more than you hold used to leave the panel showing the figure you
+       * typed while the pot held what you actually had.
+       */
+      placed = { side, amount, quota };
     }
 
     // last one in during the pause? close it rather than burn the clock
@@ -265,7 +292,21 @@ async function onPlaceBet(event, connectionId, row, msg) {
     return s;
   });
 
-  if (!res.ok) return; // ineligible, already declared, or too late — silent
+  if (!res.ok) {
+    await postTo(event, connectionId, {
+      type: "bet_denied",
+      reason: refusal ?? res.reason ?? "generic",
+    });
+    return;
+  }
+
+  /*
+   * Privately, to the bettor: what the book actually took. Sent before the
+   * broadcast so the person who staked sees their own figure settle first,
+   * and separate from `player_bet` because that one goes to the whole table —
+   * a stake is nobody else's business until the reveal prices it.
+   */
+  await postTo(event, connectionId, { type: "bet_accepted", ...placed });
   await broadcast(event, row.lobbyId, {
     type: "player_bet",
     username: row.username,

@@ -133,5 +133,71 @@ console.log("\nsettling twice");
   ok("a second settlement pays nothing", again.length === 0 && r.bettor.money === moneyAfterFirst);
 }
 
+console.log("\nwhat the book actually takes (the clamp)");
+{
+  /*
+   * The server floors a stake at MIN_BET and caps it at the bettor's own
+   * bankroll. The client used to display the figure it REQUESTED, so asking
+   * for more than you hold left the panel reporting a stake nobody had made.
+   * This is the arithmetic bet_accepted now reports back.
+   */
+  const MIN_BET = 10;
+  const clamp = (money, requested, allIn = false) => {
+    const raw = allIn ? money : Math.floor(Number(requested) || 0);
+    return Math.min(money, Math.max(MIN_BET, raw));
+  };
+  ok("asking for more than you hold takes what you hold", clamp(400, 9999) === 400);
+  ok("asking under the minimum takes the minimum", clamp(400, 3) === 10);
+  ok("all-in takes everything", clamp(400, 0, true) === 400);
+  ok("a sane figure passes through", clamp(400, 150) === 150);
+  ok("a broke player cannot be clamped up past their money", clamp(4, 999) === 4);
+}
+
+console.log("\nthe picker's blind wager in a CHALLENGE");
+{
+  /*
+   * A challenge takes no table bets — bettorsFor returns nothing — but the
+   * PICKER's own stake is committed at pick time and pushed onto state.bets.
+   * settleBets iterates that list without caring about the mode, so it must
+   * still pay. This is the case bettorsFor's empty return could easily be
+   * mistaken for "challenges do not settle".
+   */
+  const target = { username: "target", money: 1000, alive: true, stats: { correct: 48, wrong: 48 } };
+  const picker = { username: "picker", money: 900, alive: true, stats: { correct: 0, wrong: 0 } };
+  const state = {
+    players: [target, picker],
+    pot: 100,
+    minted: 0,
+    turn: { answering: "target", correct: false, mode: "challenge" },
+    // the stake already left the picker at pick time, exactly as onPickPlayer does
+    bets: [{ username: "picker", side: "wrong", amount: 100, quota: 2 }],
+  };
+  const before = state.players.reduce((s, p) => s + p.money, 0) + state.pot;
+  const results = settleBets(state);
+
+  ok("a challenge still settles the picker's bet", results.length === 1);
+  ok("and pays the full price", results[0].payout === 200, `got ${results[0]?.payout}`);
+  ok("the picker is 200 up on the settlement", picker.money === 1100, `got ${picker.money}`);
+  ok("money is conserved through a challenge",
+     before === state.players.reduce((s, p) => s + p.money, 0) + state.pot);
+  ok("the table is closed to everyone else",
+     bettorsFor({ ...state, turn: { ...state.turn, mode: "challenge" } }).length === 0);
+}
+
+console.log("\nsitting out");
+{
+  const me = { username: "me", money: 500, alive: true, stats: { correct: 0, wrong: 0 } };
+  const state = {
+    players: [{ username: "target", money: 500, alive: true, stats: { correct: 0, wrong: 0 } }, me],
+    pot: 300, minted: 0,
+    turn: { answering: "target", correct: true, mode: "open" },
+    bets: [{ username: "me", side: "neutral", amount: 0, quota: 0 }],
+  };
+  const results = settleBets(state);
+  ok("a neutral declaration is not settled at all", results.length === 0);
+  ok("and costs nothing", me.money === 500);
+  ok("and the pot is untouched", state.pot === 300);
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
