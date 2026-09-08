@@ -32,6 +32,31 @@ const NOTIFICATIONS_TABLE =
 const NOTIFICATION_TTL_DAYS = 30;
 const MATCHES_TABLE = process.env.MATCHES_TABLE || "Matches";
 
+/*
+ * WEB PUSH — one row per BROWSER, keyed by the push service's endpoint, with
+ * the username on a GSI. A player with a phone and a laptop has two rows and
+ * both should buzz.
+ */
+const PUSH_SUBSCRIPTIONS_TABLE =
+  process.env.PUSH_SUBSCRIPTIONS_TABLE || "PushSubscriptions";
+const PUSH_SUBSCRIPTIONS_INDEX =
+  process.env.PUSH_SUBSCRIPTIONS_INDEX || "username-index";
+
+/**
+ * The VAPID identity, or null when it is not configured.
+ *
+ * Null rather than throwing: push is an enhancement, and a function missing
+ * its keys should go on delivering notifications through the socket and the
+ * bell rather than failing the whole notification.
+ */
+function vapidConfig() {
+  const publicKey = process.env.VAPID_PUBLIC_KEY;
+  const privateKey = process.env.VAPID_PRIVATE_KEY;
+  const subject = process.env.VAPID_SUBJECT;
+  if (!publicKey || !privateKey || !subject) return null;
+  return { publicKey, privateKey, subject };
+}
+
 /**
  * Every chat line ever sent, one item per message. No TTL by design — see
  * lib/chatlog.mjs; this is a collection, not a cache.
@@ -345,6 +370,8 @@ export {
   NOTIFICATIONS_TABLE,
   NOTIFICATION_TTL_DAYS,
   PLAYERS_TABLE,
+  PUSH_SUBSCRIPTIONS_TABLE,
+  PUSH_SUBSCRIPTIONS_INDEX,
   POINTS_PER_WIN,
   POINTS_STREAK_BONUS,
   POINTS_STREAK_BONUS_CAP,
@@ -356,4 +383,5 @@ export {
   sleep,
   startingMoneyOf,
   ttlFrom,
+  vapidConfig,
 };

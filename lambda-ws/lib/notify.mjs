@@ -32,14 +32,23 @@
  */
 
 import crypto from "node:crypto";
-import { PutCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  DeleteCommand,
+  PutCommand,
+  QueryCommand,
+  ScanCommand,
+} from "@aws-sdk/lib-dynamodb";
 import { ddb } from "./aws.mjs";
 import {
   CONNECTIONS_TABLE,
   NOTIFICATIONS_TABLE,
   NOTIFICATION_TTL_DAYS,
+  PUSH_SUBSCRIPTIONS_TABLE,
+  PUSH_SUBSCRIPTIONS_INDEX,
+  vapidConfig,
 } from "./config.mjs";
 import { postTo } from "./connections.mjs";
+import { sendPush } from "./push.mjs";
 
 /** `<epoch ms>#<8 hex>` — ordered by time, unique within the millisecond */
 function notificationId(at) {
@@ -104,8 +113,10 @@ async function notify(event, { username, kind, data = {}, at = Date.now() }) {
   }
 
   // best effort from here: the record already exists
+  let hadSocket = false;
   try {
     const sockets = await socketsFor(username);
+    hadSocket = sockets.length > 0;
     await Promise.all(
       sockets.map((s) =>
         postTo(event, s.connectionId, { type: "notification", ...notification })
@@ -115,7 +126,98 @@ async function notify(event, { username, kind, data = {}, at = Date.now() }) {
     console.error("notification push failed", username, err?.name ?? err);
   }
 
+  /*
+   * ── AND THE THIRD DELIVERY: THE OPERATING SYSTEM ──────────────────────────
+   *
+   * Only when there was no socket. A web push wakes a service worker and puts
+   * a banner on the desktop or the phone, which is exactly right for somebody
+   * who is not here and exactly wrong for somebody who is — the in-app banner
+   * has already told them, and a second one from the OS is noise the browser
+   * shows behind the tab they are looking at.
+   *
+   * Best effort like the socket half, for the same reason: the row is already
+   * written and a push service being slow is not a reason to fail a
+   * notification. The one thing it DOES act on is a dead subscription — 404 or
+   * 410 mean the browser threw it away, and keeping the row would mean trying
+   * forever.
+   */
+  if (!hadSocket) {
+    try {
+      await pushToDevices(username, notification);
+    } catch (err) {
+      console.error("web push failed", username, err?.name ?? err);
+    }
+  }
+
   return notification;
 }
 
-export { notify, notificationId };
+/** every browser this player has allowed notifications on */
+async function subscriptionsFor(username) {
+  const res = await ddb.send(
+    new QueryCommand({
+      TableName: PUSH_SUBSCRIPTIONS_TABLE,
+      IndexName: PUSH_SUBSCRIPTIONS_INDEX,
+      KeyConditionExpression: "#u = :u",
+      ExpressionAttributeNames: { "#u": "username" },
+      ExpressionAttributeValues: { ":u": String(username) },
+    })
+  );
+  return res.Items ?? [];
+}
+
+/**
+ * Fan the notification out to the player's registered browsers.
+ *
+ * The payload is the same object the socket carries, so the service worker
+ * and the in-app client read one shape. It is small on purpose — a push
+ * payload has a hard size limit around 4KB once encrypted, and `data` here is
+ * ids and names, never prose.
+ */
+async function pushToDevices(username, notification) {
+  const vapid = vapidConfig();
+  if (!vapid) return; // no keys configured — nothing to send with
+
+  const subs = await subscriptionsFor(username);
+  if (!subs.length) return;
+
+  const results = await Promise.all(
+    subs.map(async (row) => {
+      /*
+       * Built per row, because the language is per BROWSER — the same person
+       * may read the site in Serbian on a laptop and English on a phone, and
+       * the banner is drawn by the worker on each.
+       */
+      const payload = JSON.stringify({
+        type: "notification",
+        ...notification,
+        lang: row.lang === "en" ? "en" : "sr",
+      });
+      const result = await sendPush(
+        { endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth } },
+        payload,
+        vapid
+      );
+      return { row, result };
+    })
+  );
+
+  const dead = results.filter((r) => r.result.dead);
+  await Promise.all(
+    dead.map(({ row }) =>
+      ddb
+        .send(
+          new DeleteCommand({
+            TableName: PUSH_SUBSCRIPTIONS_TABLE,
+            Key: { endpoint: row.endpoint },
+          })
+        )
+        .catch(() => {})
+    )
+  );
+  if (dead.length) {
+    console.log(`dropped ${dead.length} dead push subscription(s) for ${username}`);
+  }
+}
+
+export { notify, notificationId, pushToDevices, subscriptionsFor };
