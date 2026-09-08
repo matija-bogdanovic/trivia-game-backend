@@ -31,6 +31,7 @@ function buildTestableCopy() {
 }
 
 const written = [];
+const queries = [];
 let failNext = false;
 globalThis.__TEST_DDB__ = {
   async send(cmd) {
@@ -45,7 +46,7 @@ globalThis.__TEST_DDB__ = {
   },
 };
 
-const { recordChatMessage, messageId } = await import(buildTestableCopy());
+const { recordChatMessage, messageId, loadChatHistory } = await import(buildTestableCopy());
 
 let pass = 0;
 const failures = [];
@@ -127,6 +128,55 @@ console.log("\n── two messages in the same millisecond both survive ──")
   check("two rows written", written.length, 2);
   check("distinct sort keys", written[0].Item.message_id !== written[1].Item.message_id, true);
   check("same partition", written[0].Item.lobbyId, written[1].Item.lobbyId);
+}
+
+console.log("\n── reading the room back, oldest first ──");
+{
+  reset();
+  /*
+   * The stub answers a Query with newest-first rows, which is what
+   * ScanIndexForward:false returns — the reader has to put them back in
+   * reading order itself.
+   */
+  globalThis.__TEST_DDB__.send = async (cmd) => {
+    if (cmd.constructor.name === "QueryCommand") {
+      queries.push(cmd.input);
+      return {
+        Items: [
+          { username: "cara", displayName: "CARA", text: "third", at: 3 },
+          { username: "bob", displayName: "BOB", text: "second", at: 2 },
+          { username: null, text: "ANA joined", at: 1, kind: "system" },
+        ],
+      };
+    }
+    written.push(JSON.parse(JSON.stringify(cmd.input)));
+    return {};
+  };
+
+  const history = await loadChatHistory("lob1");
+  check("newest-first rows come back oldest-first",
+    history.map((m) => m.text), ["ANA joined", "second", "third"]);
+  check("a system line keeps its kind", history[0].kind, "system");
+  check("a player line has no kind", "kind" in history[1], false);
+  check("queried the right room", queries[0].ExpressionAttributeValues[":l"], "lob1");
+  check("asked newest-first", queries[0].ScanIndexForward, false);
+  check("and capped", queries[0].Limit, 60);
+
+  check("no lobbyId -> empty, no query", await loadChatHistory(""), []);
+}
+
+console.log("\n── a failed read never breaks the join ──");
+{
+  globalThis.__TEST_DDB__.send = async () => {
+    const e = new Error("boom");
+    e.name = "ProvisionedThroughputExceededException";
+    throw e;
+  };
+  let threw = false;
+  let out;
+  try { out = await loadChatHistory("lob1"); } catch { threw = true; }
+  check("did not throw", threw, false);
+  check("answered with an empty conversation", out, []);
 }
 
 console.log(`\n${"=".repeat(60)}`);

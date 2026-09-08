@@ -18,6 +18,7 @@ import {
 } from "../config.mjs";
 import { postTo, ttlFromNow } from "../connections.mjs";
 import { resolveLobby, walletProfile } from "../lobbies.mjs";
+import { loadChatHistory } from "../chatlog.mjs";
 import { phaseMessage, systemChat } from "../messages.mjs";
 import { broadcastLobbyState } from "../presence.mjs";
 import { publicGameState, readGameState } from "../state.mjs";
@@ -169,9 +170,23 @@ async function onJoin(event, connectionId, msg, row) {
     })
   );
 
-  // no per-room chat history is persisted yet, but the client clears its list
-  // on this message, so send it and keep the contract honest
-  await postTo(event, connectionId, { type: "chat_history", messages: [] });
+  /*
+   * The conversation so far.
+   *
+   * This sent an EMPTY list under a comment saying no history was persisted.
+   * That was true when it was written and stopped being true the moment
+   * chatlog.mjs landed — the table has 61 rows and nothing had ever read one.
+   *
+   * The bug that hid behind it is worse than a missing feature. The client
+   * REPLACES its chat list on this message, and a reconnect is a fresh join,
+   * so every dropped connection wiped the chat for whoever came back. A
+   * serverless socket reconnects on any blip, which made it common rather
+   * than rare.
+   */
+  await postTo(event, connectionId, {
+    type: "chat_history",
+    messages: await loadChatHistory(canonicalId),
+  });
 
   /*
    * The row we just wrote is handed to the broadcast rather than left to be
