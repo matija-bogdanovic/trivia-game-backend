@@ -453,17 +453,31 @@ export const handler = async (event) => {
      */
     const nameOf = async (name) => {
       const w = await getWalletIfExists(name);
-      return { w, displayName: w?.displayName ?? name };
+      /*
+       * The AVATAR comes back too, and this is the only place it can come
+       * from. The frontend has one avatar component reading one hook, and
+       * that hook can only render a picture it is given a string for — so
+       * every friend on /friends drew as an initial, not because the
+       * component was wrong but because this route never told it there was
+       * a picture. The wallet is already read here for the display name;
+       * the avatar is on the same item and costs nothing extra.
+       */
+      return {
+        w,
+        displayName: w?.displayName ?? name,
+        avatar: w?.avatar ?? null,
+      };
     };
 
     const [friends, incoming, outgoing] = await Promise.all([
       Promise.all(
         (me.friends ?? []).map(async (name) => {
-          const { w, displayName } = await nameOf(name);
+          const { w, displayName, avatar } = await nameOf(name);
           const status = presence.get(name) ?? "offline";
           return {
             username: name,
             displayName,
+            avatar,
             status,
             // kept so a client that predates `status` keeps working; it is
             // now truthful rather than hardcoded false
@@ -476,13 +490,17 @@ export const handler = async (event) => {
       ),
       // requests sent TO me, awaiting my answer
       Promise.all(
-        (me.friendRequests ?? []).map(async (name) => ({
-          username: name,
-          displayName: (await nameOf(name)).displayName,
-          status: "pending",
-          // the pending arrays hold bare usernames; only a denial is stamped
-          createdAt: null,
-        }))
+        (me.friendRequests ?? []).map(async (name) => {
+          const { displayName, avatar } = await nameOf(name);
+          return {
+            username: name,
+            displayName,
+            avatar,
+            status: "pending",
+            // the pending arrays hold bare usernames; only a denial is stamped
+            createdAt: null,
+          };
+        })
       ),
       /*
        * My own half: what I have asked for and not yet been answered on, and
@@ -491,14 +509,18 @@ export const handler = async (event) => {
        * their `friendRequests`, and a denial is recorded on the sender alone.
        */
       Promise.all([
-        ...(me.outgoingRequests ?? []).map(async (name) => ({
-          username: name,
-          displayName: (await nameOf(name)).displayName,
-          status: "pending",
-          createdAt: null,
-          updatedAt: null,
-          retryAt: null,
-        })),
+        ...(me.outgoingRequests ?? []).map(async (name) => {
+          const { displayName, avatar } = await nameOf(name);
+          return {
+            username: name,
+            displayName,
+            avatar,
+            status: "pending",
+            createdAt: null,
+            updatedAt: null,
+            retryAt: null,
+          };
+        }),
         /*
          * A name can be in BOTH lists: the ledger entry survives a
          * re-request, because the denial count is what escalates the
@@ -520,9 +542,11 @@ export const handler = async (event) => {
               count >= DENY_ESCALATE_AFTER
                 ? DENY_COOLDOWN_REPEAT_MS
                 : DENY_COOLDOWN_MS;
+            const { displayName, avatar } = await nameOf(name);
             return {
               username: name,
-              displayName: (await nameOf(name)).displayName,
+              displayName,
+              avatar,
               status: "denied",
               createdAt: null,
               updatedAt: at,

@@ -51,7 +51,7 @@
  *
  * ── CONTRACT (matches the Express route exactly — do not change) ───────────
  *   Request:  GET /leaderboard
- *   Response: 200 { leaderboard: [{ username, displayName, wins, gamesPlayed,
+ *   Response: 200 { leaderboard: [{ username, displayName, avatar, wins, gamesPlayed,
  *                                   coins, points, currentStreak, bestStreak }] }
  *
  * ── NOTE ───────────────────────────────────────────────────────────────────
@@ -128,6 +128,10 @@ export const handler = async (event) => {
       .map((w) => ({
         username: w.username,
         displayName: w.displayName ?? w.username,
+        // the whole row is already in hand from the scan, so carrying the
+        // avatar costs nothing — and without it the podium and every table
+        // row could only ever draw an initial
+        avatar: w.avatar ?? null,
         wins: w.wins ?? 0,
         gamesPlayed: w.gamesPlayed ?? 0,
         coins: w.coins ?? 0,
