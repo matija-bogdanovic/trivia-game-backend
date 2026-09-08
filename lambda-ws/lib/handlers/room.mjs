@@ -248,6 +248,27 @@ async function onLeave(event, connectionId, row) {
       `${heir.displayName || heir.player} is the host now`,
       "host_changed"
     );
+
+    /*
+     * A structured event as well as the chat line.
+     *
+     * The chat line is the record; this is the announcement. A room that
+     * changes hands changes who can press START, and a client should not have
+     * to diff two lobby_state payloads to notice — nor read a sentence out of
+     * the chat stream, which is in whatever language the SERVER writes.
+     *
+     * Carries the username so the client can tell "you are the host now" from
+     * "somebody else is", and the display name so it has something to show
+     * without a lookup.
+     */
+    await broadcast(event, lobbyId, {
+      type: "host_changed",
+      host: String(heir.player),
+      hostName: String(heir.displayName || heir.player),
+      previous: String(row.username),
+      at: Date.now(),
+    });
+
     await broadcastLobbyState(event, lobbyId);
     return;
   }
