@@ -73,6 +73,7 @@
 
 import crypto from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import {
   DynamoDBDocumentClient,
   GetCommand,
@@ -82,6 +83,8 @@ import {
 // ─── config ────────────────────────────────────────────────────────────────
 const REGION = process.env.AWS_REGION || "eu-west-3";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? "http://localhost:3000";
+const AVATAR_BUCKET = process.env.AVATAR_BUCKET || "ipak-se-okrece-avatars";
+const s3 = new S3Client({ region: REGION });
 const PLAYERS_TABLE = process.env.PLAYERS_TABLE || "Players";
 
 // clients at module scope so warm invocations reuse the connections
@@ -330,6 +333,70 @@ async function saveWallet(wallet) {
   await ddb.send(new PutCommand({ TableName: PLAYERS_TABLE, Item: wallet }));
 }
 
+
+/**
+ * Take a copy of a federated profile picture, instead of pointing at it.
+ *
+ * ── WHY NOT JUST STORE THE URL ─────────────────────────────────────────────
+ * Because Google rate-limits it. lh3.googleusercontent.com answers 429 to a
+ * client that asks too often, and "too often" is a lobby: six tiles, each an
+ * <img> at Google's CDN, re-requested on every render and every reconnect.
+ * The browser then draws a broken image with the alt text spilling out of the
+ * frame, which is exactly what it was doing.
+ *
+ * Hotlinking is also a promise somebody else can break. That URL rotates when
+ * the user changes their Google picture, and nothing tells us — a stored
+ * pointer would rot silently.
+ *
+ * So the picture is fetched ONCE, on the sign-in that adopts it, and written
+ * to the same bucket and the same key an uploaded avatar uses. From then on it
+ * is served by GET /avatar/img/<username> like any other, with our caching and
+ * no third party in the path.
+ *
+ * Returns the "u|<version>" pointer, or null — a picture that will not
+ * download is not a reason to fail a wallet load, and the caller leaves the
+ * avatar unset so the initials render and the next sign-in tries again.
+ */
+async function adoptRemotePicture(username, url) {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
+    if (!res.ok) {
+      console.error("picture fetch failed", username, res.status);
+      return null;
+    }
+
+    const type = res.headers.get("content-type") ?? "";
+    if (!type.startsWith("image/")) {
+      console.error("picture was not an image", username, type);
+      return null;
+    }
+
+    const bytes = Buffer.from(await res.arrayBuffer());
+    // a Google avatar at =s96-c is a few KB; anything far larger is not the
+    // thing we asked for, and this is written to a bucket we pay for
+    if (bytes.length === 0 || bytes.length > 2_000_000) {
+      console.error("picture had an implausible size", username, bytes.length);
+      return null;
+    }
+
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: AVATAR_BUCKET,
+        // the SAME key an upload uses, so a later upload simply overwrites
+        // this and there is only ever one avatar object per player
+        Key: `avatars/${encodeURIComponent(username)}.jpg`,
+        Body: bytes,
+        ContentType: type,
+      })
+    );
+
+    return `u|${Date.now()}`;
+  } catch (err) {
+    console.error("picture adoption failed", username, err?.name ?? err);
+    return null;
+  }
+}
+
 // ─── handler ───────────────────────────────────────────────────────────────
 export const handler = async (event) => {
   // CORS preflight, when API Gateway is not answering it for us
@@ -376,8 +443,20 @@ export const handler = async (event) => {
       picture.startsWith("https://") &&
       picture.length <= 500
     ) {
-      wallet.avatar = `g|${picture}`;
-      await saveWallet(wallet);
+      /*
+       * Copied, not linked. See adoptRemotePicture — Google rate-limits its
+       * CDN, and a lobby full of <img> tags pointed at it is exactly the
+       * traffic that triggers it.
+       *
+       * A failure leaves the avatar unset rather than storing a pointer we
+       * know will break: the initials render, and the next sign-in tries
+       * again, because this runs on every wallet load.
+       */
+      const pointer = await adoptRemotePicture(username, picture);
+      if (pointer) {
+        wallet.avatar = pointer;
+        await saveWallet(wallet);
+      }
     }
 
     const displayName = body.displayName;
