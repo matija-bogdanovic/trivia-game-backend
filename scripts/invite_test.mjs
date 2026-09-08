@@ -26,8 +26,16 @@ function buildTestableCopy() {
       "const postTo = (...a) => globalThis.__POST__(...a);\nconst ttlFromNow = () => 1;",
     ],
     [
-      'import { resolveLobby } from "../lobbies.mjs";',
-      "const resolveLobby = (id) => globalThis.__LOBBY__(id);",
+      'import { isHostOf, resolveLobby, seatName } from "../lobbies.mjs";',
+      "const resolveLobby = (id) => globalThis.__LOBBY__(id);\n" +
+        // the real ones — they are pure, so there is nothing to fake and
+        // faking them would stop this file testing the thing it names
+        'const seatName = (s) => (typeof s === "string" ? s : ' +
+        "(s?.player ?? s?.username ?? s?.id) == null ? null : " +
+        "String(s?.player ?? s?.username ?? s?.id));\n" +
+        "const isHostOf = (l, u) => { if (!u || !Array.isArray(l?.players)) return false; " +
+        'const h = l.players.find((p) => p?.role === "Admin"); ' +
+        "return Boolean(h && seatName(h) === String(u)); };",
     ],
     [
       'import { notify } from "../notify.mjs";',
@@ -111,6 +119,20 @@ const lastToSender = () => sent.filter((s) => s.connectionId === "c-ana").pop()?
 
 const ANA_IN_ROOM = { username: "ana", lobbyId: "lob1", displayName: "ANA" };
 
+/*
+ * A seat in the shape createRoom and joinRoom write: `player` holds the name
+ * and there is no `username` key. The old fixtures invented one, which is
+ * precisely why invite.mjs's already-here guard could read p?.username and
+ * still pass its tests while never firing in production.
+ */
+const seat = (name, role = "Member") => ({
+  id: name,
+  player: name,
+  role,
+  points: 500,
+  joinedAt: 1,
+});
+
 console.log("\n── hello ──");
 {
   reset();
@@ -140,23 +162,29 @@ console.log("\n── invite: the refusals ──");
   await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "ana" });
   check("cannot invite yourself", lastToSender().reason, "self");
 
-  players = { ana: { username: "ana", friends: ["cara"] } };
-  reset();
-  await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "bob" });
-  check("not a friend", lastToSender().reason, "not-friend");
-
   players = { ana: { username: "ana", friends: ["bob"] } };
   lobby = null;
   reset();
   await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "bob" });
   check("room vanished", lastToSender().reason, "room-gone");
 
-  lobby = { code: 4242, roomName: "ARENA", players: [{ username: "bob" }] };
+  /*
+   * A NON-HOST naming someone who is not a friend. Ana sits as a Member, so
+   * the friend list is the only thing that could let her through.
+   */
+  players = { ana: { username: "ana", friends: ["cara"] }, bob: { username: "bob" } };
+  lobby = { code: 4242, roomName: "ARENA", players: [seat("dana", "Admin"), seat("ana")] };
+  reset();
+  await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "bob" });
+  check("a member cannot name a non-friend", lastToSender().reason, "not-friend");
+
+  players = { ana: { username: "ana", friends: ["bob"] } };
+  lobby = { code: 4242, roomName: "ARENA", players: [seat("bob", "Admin")] };
   reset();
   await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "bob" });
   check("already at this table", lastToSender().reason, "already-here");
 
-  lobby = { code: 4242, roomName: "ARENA", players: [{ username: "ana" }] };
+  lobby = { code: 4242, roomName: "ARENA", players: [seat("ana", "Admin")] };
   connections = [];
   reset();
   await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "bob" });
@@ -241,6 +269,58 @@ console.log("\n── the lobby's player list may hold bare strings ──");
   reset();
   await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "bob" });
   check("string entries are read too", lastToSender().reason, "already-here");
+}
+
+console.log("\n── the host may name anyone by username ──");
+{
+  /*
+   * Option A: the username IS the identifier. There is no #1234 to type
+   * beside it, because usernames are already unique — so "add a player" is a
+   * single field, and these are the answers it can come back with.
+   */
+  const ANA_HOSTS = { code: 7, roomName: "R", maxPlayers: 6, players: [seat("ana", "Admin")] };
+
+  players = { ana: { username: "ana", friends: [] }, zoran: { username: "zoran" } };
+  lobby = ANA_HOSTS;
+  connections = [];
+  reset();
+  await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "zoran" });
+  check("the host reaches a stranger", lastToSender().type, "invite_sent");
+  check("and the invite was written", notified.length, 1);
+  check("addressed to them", notified[0].username, "zoran");
+
+  // the name was simply typed wrong — a thing a friend list can never do
+  reset();
+  await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "zorna" });
+  check("a name nobody holds", lastToSender().reason, "no-such-player");
+  check("and nothing was written", notified.length, 0);
+
+  // the host is not exempt from the other rules
+  reset();
+  await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "ana" });
+  check("the host still cannot invite themselves", lastToSender().reason, "self");
+
+  lobby = { ...ANA_HOSTS, players: [seat("ana", "Admin"), seat("zoran")] };
+  reset();
+  await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "zoran" });
+  check("nor someone already seated", lastToSender().reason, "already-here");
+  check("which is the guard that never fired before, on a REAL seat shape",
+    notified.length, 0);
+
+  lobby = {
+    ...ANA_HOSTS, maxPlayers: 2,
+    players: [seat("ana", "Admin"), seat("pera")],
+  };
+  reset();
+  await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "zoran" });
+  check("nor into a full room", lastToSender().reason, "room-full");
+
+  // and a friend still needs no host badge
+  players = { ana: { username: "ana", friends: ["zoran"] }, zoran: { username: "zoran" } };
+  lobby = { code: 7, roomName: "R", maxPlayers: 6, players: [seat("dana", "Admin"), seat("ana")] };
+  reset();
+  await onInviteFriend({}, "c-ana", ANA_IN_ROOM, { target: "zoran" });
+  check("a member may still invite a friend", lastToSender().type, "invite_sent");
 }
 
 console.log(`\n${"=".repeat(60)}`);

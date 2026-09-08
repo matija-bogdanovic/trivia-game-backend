@@ -47,7 +47,7 @@ import { identityFromToken } from "../auth.mjs";
 import { ddb } from "../aws.mjs";
 import { CONNECTIONS_TABLE, PLAYERS_TABLE, capacityOf } from "../config.mjs";
 import { postTo, ttlFromNow } from "../connections.mjs";
-import { resolveLobby } from "../lobbies.mjs";
+import { isHostOf, resolveLobby, seatName } from "../lobbies.mjs";
 import { notify } from "../notify.mjs";
 
 /**
@@ -128,26 +128,70 @@ async function onInviteFriend(event, connectionId, row, msg) {
     return;
   }
 
-  // friendship is read from the SENDER's record: you may only invite someone
-  // who has already accepted you
-  const me = await ddb.send(
-    new GetCommand({ TableName: PLAYERS_TABLE, Key: { username: from } })
-  );
-  const friends = Array.isArray(me.Item?.friends) ? me.Item.friends : [];
-  if (!friends.includes(target)) {
-    await fail(event, connectionId, "not-friend", target);
-    return;
-  }
-
   const lobby = await resolveLobby(lobbyId);
   if (!lobby) {
     await fail(event, connectionId, "room-gone", target);
     return;
   }
 
-  // already at this table — seated or watching
+  /*
+   * ── WHO YOU MAY NAME ──────────────────────────────────────────────────────
+   *
+   * Two ways in, and the room's HOST is what separates them.
+   *
+   * A friend, for anyone. Friendship is read from the SENDER's own record, so
+   * you may only invite someone who has already accepted you — an invite is a
+   * push notification, and letting any player send one to any username would
+   * be handing out a way to pester strangers.
+   *
+   * Any username, for the host. The host is the one filling the room, and
+   * "add a player" is meaningless if it only reaches people already on your
+   * list. The exposure is bounded by what a host actually is: they hold one
+   * room, an invite to it is a single row and a single banner, and the target
+   * can ignore it. Everyone else at the table still needs friendship.
+   *
+   * Usernames are the identifier — they are already unique, which is the whole
+   * reason there is no #1234 tag to type alongside one.
+   */
+  const me = await ddb.send(
+    new GetCommand({ TableName: PLAYERS_TABLE, Key: { username: from } })
+  );
+  const friends = Array.isArray(me.Item?.friends) ? me.Item.friends : [];
+  if (!friends.includes(target)) {
+    if (!isHostOf(lobby, from)) {
+      await fail(event, connectionId, "not-friend", target);
+      return;
+    }
+    /*
+     * A typed name can simply be wrong, which a friend's name never is. So
+     * this path — and only this path — checks the account exists, and says so
+     * distinctly: "no such player" and "they said no" are different answers
+     * and the host should not have to guess which one they got.
+     */
+    const found = await ddb.send(
+      new GetCommand({
+        TableName: PLAYERS_TABLE,
+        Key: { username: target },
+        ProjectionExpression: "username",
+      })
+    );
+    if (!found.Item) {
+      await fail(event, connectionId, "no-such-player", target);
+      return;
+    }
+  }
+
+  /*
+   * Already at this table — seated or watching.
+   *
+   * This read `p?.username`, and a roster seat has no such field: it carries
+   * `player`. So the guard compared undefined to a name and refused nobody,
+   * ever. It matters more now than it did, because a host typing a name by
+   * hand is far likelier to name someone already sitting there than a friend
+   * list is.
+   */
   const here = Array.isArray(lobby.players) ? lobby.players : [];
-  if (here.some((p) => (typeof p === "string" ? p : p?.username) === target)) {
+  if (here.some((p) => seatName(p) === target)) {
     await fail(event, connectionId, "already-here", target);
     return;
   }

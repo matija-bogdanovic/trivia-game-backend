@@ -20,7 +20,7 @@ import {
   postTo,
   ttlFromNow,
 } from "../connections.mjs";
-import { resolveLobby } from "../lobbies.mjs";
+import { isHostOf, resolveLobby } from "../lobbies.mjs";
 import { broadcastPhase, systemChat } from "../messages.mjs";
 import { enterGameOver, markEliminated } from "../phases.mjs";
 import { broadcastLobbyState } from "../presence.mjs";
@@ -59,13 +59,6 @@ async function closeRoom(event, lobbyId, reason) {
   await Promise.all(
     rows.map((r) => deleteConnection(r.connectionId).catch(() => {}))
   );
-}
-
-/** is this connection's user the room's Admin? */
-async function isHostOf(lobby, username) {
-  if (!username || !Array.isArray(lobby?.players)) return false;
-  const host = lobby.players.find((p) => p?.role === "Admin");
-  return Boolean(host && String(host.player) === username);
 }
 
 /**
@@ -493,7 +486,6 @@ export {
   HOST_ONLY_ACTIONS,
   HOST_ONLY_MESSAGE,
   closeRoom,
-  isHostOf,
   onKickPlayer,
   onLeave,
   onTerminateLobby,
