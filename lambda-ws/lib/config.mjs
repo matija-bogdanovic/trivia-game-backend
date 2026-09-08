@@ -114,9 +114,29 @@ const ROUND_INTRO_MS = 2500;
 const SPIN_TIME_MS = 5000;
 const BASE_QUESTION_TIME_MS = 15000;
 const MIN_QUESTION_TIME_MS = 8000;
-const BETTING_TIME_MS = 4500;   // room.ts has NO endsAt for this one — we do
+/*
+ * THE BETTING PAUSE.
+ *
+ * Was 4500. The book is open from the moment the question appears, so on paper
+ * a bettor had the whole question clock as well — but the panel only counts
+ * down during this pause, and an answerer who buzzes in two seconds collapses
+ * the entire window to these milliseconds. Four and a half seconds is not
+ * enough to read the odds, type a figure and choose a side; Matija's report was
+ * that the clock ran out while he was still setting the amount.
+ *
+ * Eight seconds is a pause, not a scramble. It is still short enough that a
+ * table where everyone has already decided ends it early — pendingBettors()
+ * closes the phase the moment the last declaration lands, so the extra time is
+ * only ever spent by someone actually using it.
+ */
+const BETTING_TIME_MS = 8000;
 const REVEAL_MS = 5000;
-const PICK_TIME_MS = 15000;
+/*
+ * Was 15000, for a screen that asks FOUR questions: who, which mode, which
+ * side, and how much. The wager is optional, but sizing one meant doing it
+ * against the same clock that has to cover choosing a target at all.
+ */
+const PICK_TIME_MS = 20000;
 const DUEL_TIME_MS = 20000;
 const CODE_DUEL_TIME_MS = 90000;
 

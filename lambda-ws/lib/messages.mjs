@@ -74,6 +74,19 @@ function phaseMessage(state) {
         difficulty: state.duel?.question?.difficulty,
         // who has already buzzed in — NOT what they said
         answered: Object.keys(state.duel?.answers ?? {}),
+        /*
+         * HOW LONG each buzz took, in milliseconds from the question going up.
+         * Speed is the whole game here, so the race times are worth showing
+         * while the race is still on — and showing them gives nothing away:
+         * this says a racer took 2.34s, never whether they were right. The
+         * verdict still waits for duel_result.
+         */
+        answeredAt: Object.fromEntries(
+          Object.entries(state.duel?.answers ?? {}).map(([u, a]) => [
+            u,
+            Math.max(0, Number(a?.atMs ?? 0)),
+          ])
+        ),
         answerTimeMs: Math.max(0, Number(state.phaseEndsAt) - nowMs()),
       };
     case "betting":

@@ -312,6 +312,14 @@ function publicGameState(s) {
               }
             : null,
           answered: Object.keys(s.duel.answers ?? {}),
+          // how long each buzz took, never what it said — a rejoining client
+          // gets the same race times the live ones have been watching
+          answeredAt: Object.fromEntries(
+            Object.entries(s.duel.answers ?? {}).map(([u, a]) => [
+              u,
+              Math.max(0, Number(a?.atMs ?? 0)),
+            ])
+          ),
           result: s.duel.resolved ? s.duel.result ?? null : null,
         }
       : null,
