@@ -53,7 +53,9 @@
  *   Request:  GET /lobbies
  *   Response: 200 { lobbies: [{ lobbyId, code, roomName, isPrivate,
  *                               playerCount, maxPlayers, startingMoney, phase,
- *                               isLive, createdAt, host, categories }] }
+ *                               isLive, createdAt, owner, host, categories }] }
+ *   `owner` is the room's owner as createRoom recorded it; `host` is the same
+ *   person derived from the roster, kept for clients that already read it.
  *   Free seats are playerCount subtracted from maxPlayers. Rooms created
  *   before maxPlayers existed report 6, the cap they were created under.
  *
@@ -196,8 +198,15 @@ async function listActiveLobbies() {
     new ScanCommand({
       TableName: LOBBIES_TABLE,
       ProjectionExpression:
-        "lobby_id, code, roomName, players, createdAt, isPrivate, #st, #cat, maxPlayers, startingMoney, spectateEnabled",
-      ExpressionAttributeNames: { "#st": "state", "#cat": "categories" },
+        "lobby_id, code, roomName, players, createdAt, isPrivate, #st, #cat, maxPlayers, startingMoney, spectateEnabled, #own",
+      // OWNER is a DynamoDB reserved word, so it can only be projected through
+      // an expression-attribute name — an unaliased `owner` is a runtime
+      // ValidationException, not something the console catches at paste time
+      ExpressionAttributeNames: {
+        "#st": "state",
+        "#cat": "categories",
+        "#own": "owner",
+      },
     })
   );
   const rows = (scan.Items ?? []).filter((l) => l.state !== "finished");
@@ -232,6 +241,19 @@ async function listActiveLobbies() {
           ? true
           : Boolean(l.spectateEnabled),
         createdAt: l.createdAt ?? null,
+        /*
+         * Who the room belongs to.
+         *
+         * `owner` is the field createRoom writes; `host` is the same person
+         * found the old way, by scanning the roster for role "Admin".
+         *
+         * Both are returned, and owner falls back to host, for two different
+         * reasons. Rooms written before the field existed have no `owner`, so
+         * the scan is what answers for them. And `host` is what the deployed
+         * frontend already reads — dropping it would blank the listing on any
+         * client that has not shipped yet.
+         */
+        owner: l.owner ? String(l.owner) : host ? String(host.player) : null,
         host: host ? String(host.player) : null,
         categories: Array.isArray(l.categories)
           ? l.categories.map(String)

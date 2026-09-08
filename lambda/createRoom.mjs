@@ -59,7 +59,8 @@
  *
  * ── CONTRACT (matches the Express route exactly — do not change) ───────────
  *   Request:  POST /createRoom
- *             { "roomName": "...", "playerId": "...",
+ *             { "roomName": "...", "playerId": "...",   ← IGNORED; the owner
+ *                                                       comes from the token
  *               "isPrivate"?: bool, "password"?: "..." (4+ chars if private),
  *               "categories"?: ["Science","History"] — array of strings;
  *                              missing or empty stores ["Mixed"], a non-array
@@ -548,6 +549,19 @@ export const handler = async (event) => {
         Item: {
           lobby_id: lobbyId,
           createdAt: new Date().toISOString(),
+          /*
+           * Who this room belongs to, as a field of its own.
+           *
+           * Ownership was only ever implicit: every reader — lobbies.mjs,
+           * leaveRoom, isHostOf, lobbyStateMessage, the WS state builder —
+           * found it by scanning `players` for role "Admin". That works, but
+           * it means the answer to "whose room is this" costs a linear search
+           * of a nested array at every read, cannot be queried at all, and is
+           * lost the moment the roster is rewritten by a join or a leave.
+           *
+           * Written from the VERIFIED token username, never from the body.
+           */
+          owner: username,
           roomName: String(roomName),
           code: Number(roomCode),
           isPrivate: roomIsPrivate,
@@ -561,7 +575,19 @@ export const handler = async (event) => {
           ...(passwordHash ? { passwordHash } : {}),
           players: [
             {
-              id: String(playerId),
+              /*
+               * `id` used to be String(playerId) — the value the CLIENT put in
+               * the body — while `player` beside it was the username off the
+               * verified token. Two fields for one thing, and the forgeable
+               * one was the one named `id`.
+               *
+               * Nothing has ever read it: every ownership check in both
+               * Lambdas goes through `player` and `role`. So it was a
+               * forgeable field with no consumer, which is the kind of thing
+               * that stays harmless right up until somebody uses it. Both
+               * carry the verified username now.
+               */
+              id: username,
               player: username,
               role: "Admin",
               points: Number(roomStartingMoney),
