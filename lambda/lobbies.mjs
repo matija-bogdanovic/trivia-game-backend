@@ -85,6 +85,7 @@ import {
   DynamoDBDocumentClient,
   ScanCommand,
   BatchGetCommand,
+  DeleteCommand,
 } from "@aws-sdk/lib-dynamodb";
 
 // ─── config ────────────────────────────────────────────────────────────────
@@ -92,6 +93,7 @@ const REGION = process.env.AWS_REGION || "eu-west-3";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? "http://localhost:3000";
 const LOBBIES_TABLE = process.env.LOBBIES_TABLE || "Lobbies";
 const GAME_STATE_TABLE = process.env.GAME_STATE_TABLE || "GameState";
+const CONNECTIONS_TABLE = process.env.CONNECTIONS_TABLE || "Connections";
 
 // clients at module scope so warm invocations reuse the connections
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
@@ -133,7 +135,20 @@ function json(event, statusCode, body) {
   };
 }
 
-const FRESH_LOBBY_MS = 60 * 60 * 1000;
+/**
+ * How long a room with NOBODY CONNECTED stays listed.
+ *
+ * Two hours, and the number is not arbitrary: it is the Connections table's
+ * own TTL. A socket row survives two hours past its socket, so "no live
+ * connection for longer than that" is the same statement as "no trace of
+ * anybody here outlived them".
+ *
+ * It also covers the gap at the other end. A room is created over REST and
+ * the socket connects a moment later, so a brand-new room legitimately has no
+ * connection yet; anything younger than this is given the benefit of the
+ * doubt rather than hidden the instant it appears.
+ */
+const STALE_LOBBY_MS = 2 * 60 * 60 * 1000;
 /** capacity for rooms written before `maxPlayers` was a stored field */
 const DEFAULT_MAX_PLAYERS = 6;
 /** stake for rooms written before `startingMoney` was a stored field */
@@ -193,6 +208,70 @@ function statusFor(phase) {
   return "playing";
 }
 
+/**
+ * Every lobby with at least one socket open on it, right now.
+ *
+ * One Scan of a small table: Connections holds one row per LIVE socket under a
+ * two-hour TTL, so it is tens of items rather than millions — the same reason
+ * friendsList.mjs scans it, and it says so there too.
+ *
+ * A failure returns an EMPTY set rather than throwing, and that direction is
+ * deliberate: with no presence information every room falls back to the age
+ * test, so a browse page degrades to "recently created rooms" instead of
+ * failing outright. Showing a slightly stale list beats showing an error.
+ */
+async function lobbiesWithLiveSockets() {
+  try {
+    const res = await ddb.send(
+      new ScanCommand({
+        TableName: CONNECTIONS_TABLE,
+        ProjectionExpression: "lobbyId",
+      })
+    );
+    return new Set(
+      (res.Items ?? [])
+        .map((row) => (row.lobbyId ? String(row.lobbyId) : null))
+        .filter(Boolean)
+    );
+  } catch (err) {
+    console.error("presence scan failed; falling back to age alone", err);
+    return new Set();
+  }
+}
+
+/**
+ * Rooms nobody has been connected to for longer than STALE_LOBBY_MS.
+ *
+ * Deleted rather than merely hidden, because nothing else will ever do it:
+ * Lobbies has no TTL, there is no scheduled sweeper, and every other delete
+ * path needs a person to press something. A hidden row is a row that stays
+ * forever.
+ *
+ * Best effort, and never awaited by the response — a browse page must not get
+ * slower or fail because a tidy-up did. It is idempotent and bounded by what
+ * this listing already read, so a concurrent invocation racing it costs a
+ * duplicate delete of a row that is going anyway.
+ */
+function sweepStale(rows, live) {
+  const now = Date.now();
+  const doomed = rows.filter((l) => {
+    if (live.has(String(l.lobby_id))) return false;
+    return now - new Date(l.createdAt ?? 0).getTime() > STALE_LOBBY_MS;
+  });
+  if (!doomed.length) return;
+  console.log(`sweeping ${doomed.length} abandoned lobby row(s)`);
+  for (const l of doomed) {
+    ddb
+      .send(
+        new DeleteCommand({
+          TableName: LOBBIES_TABLE,
+          Key: { lobby_id: String(l.lobby_id) },
+        })
+      )
+      .catch((err) => console.error("sweep failed for", l.lobby_id, err));
+  }
+}
+
 async function listActiveLobbies() {
   const scan = await ddb.send(
     new ScanCommand({
@@ -210,7 +289,17 @@ async function listActiveLobbies() {
     })
   );
   const rows = (scan.Items ?? []).filter((l) => l.state !== "finished");
-  const phases = await runningPhases(rows.map((l) => String(l.lobby_id)));
+  /*
+   * Both reads go out together. They do not need each other's answer, and a
+   * browse page should be one round trip's worth of waiting rather than two.
+   */
+  const [phases, live] = await Promise.all([
+    runningPhases(rows.map((l) => String(l.lobby_id))),
+    lobbiesWithLiveSockets(),
+  ]);
+
+  // fire and forget; see sweepStale on why the response never waits for it
+  sweepStale(rows, live);
 
   return rows
     .map((l) => {
@@ -222,8 +311,13 @@ async function listActiveLobbies() {
         code: Number(l.code),
         roomName: l.roomName ?? `Room ${l.code}`,
         isPrivate: Boolean(l.isPrivate),
-        // the roster in DynamoDB is the only player source a Lambda has; the
-        // live "connected right now" count needs the game server (Phase 2)
+        /*
+         * Still the ROSTER, which is the right number for "how many seats are
+         * taken" — a player who refreshes has not freed their seat. Whether
+         * anyone is actually THERE is a separate question, and it is now
+         * answered by the presence set rather than by this count; see the
+         * filter below.
+         */
         playerCount: players.length,
         // rooms created before maxPlayers existed have no attribute — 6 was
         // the hardcoded cap they were created under, so it is the right default
@@ -262,12 +356,33 @@ async function listActiveLobbies() {
     })
     .filter((l) => {
       if (l.phase !== "lobby" && l.phase !== "countdown") return false;
-      // a room with a roster stays listed however old it is — it is only
-      // EMPTY rooms that age out. Keying this off isLive (always false here)
-      // is what used to make a busy room vanish an hour after creation.
-      if (l.playerCount > 0) return true;
+
+      /*
+       * ── PRESENCE, NOT THE ROSTER ──────────────────────────────────────────
+       *
+       * This used to read `if (l.playerCount > 0) return true` — a room with
+       * anybody on its roster was listed forever. That looks right and leaks,
+       * because a ROSTER SEAT AND A PRESENT PLAYER ARE NOT THE SAME THING.
+       *
+       * onDisconnect deliberately keeps the seat: "a disconnect is not a
+       * departure", so that an ordinary page refresh does not read as someone
+       * walking out. Correct — and it means a seat outlives its socket
+       * indefinitely, because only an explicit leave, kick or terminate ever
+       * removes one. The connection row expires in two hours; the seat never
+       * does; the lobby row has no TTL at all.
+       *
+       * A room was found sitting in the browse list twenty-nine hours after
+       * its only occupant closed the tab, advertising a free seat in a game
+       * nobody was in.
+       *
+       * So the question asked here is whether anyone is CONNECTED, which is
+       * what the doc comment above this file's helpers said all along — that
+       * arm was degraded because it needed the live game server to answer.
+       * Presence lives in DynamoDB now, so it can be asked again.
+       */
+      if (live.has(String(l.lobbyId))) return true;
       const age = Date.now() - new Date(l.createdAt ?? 0).getTime();
-      return age < FRESH_LOBBY_MS;
+      return age < STALE_LOBBY_MS;
     })
     .sort(
       (a, b) =>

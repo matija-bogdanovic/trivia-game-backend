@@ -73,6 +73,7 @@ import {
 const REGION = process.env.AWS_REGION || "eu-west-3";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? "http://localhost:3000";
 const LOBBIES_TABLE = process.env.LOBBIES_TABLE || "Lobbies";
+const CONNECTIONS_TABLE = process.env.CONNECTIONS_TABLE || "Connections";
 
 // clients at module scope so warm invocations reuse the connections
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
@@ -114,10 +115,40 @@ function json(event, statusCode, body) {
   };
 }
 
-const FRESH_LOBBY_MS = 60 * 60 * 1000;
+/**
+ * How long a room with nobody connected stays counted. Two hours, matching
+ * the Connections TTL — see the longer note in lobbies.mjs, which this file
+ * is a deliberate copy of.
+ */
+const STALE_LOBBY_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * Every lobby with a socket open on it. The twin of the same function in
+ * lobbies.mjs; both files carry their own copy because each Lambda route is
+ * self-contained here.
+ */
+async function lobbiesWithLiveSockets() {
+  try {
+    const res = await ddb.send(
+      new ScanCommand({
+        TableName: CONNECTIONS_TABLE,
+        ProjectionExpression: "lobbyId",
+      })
+    );
+    return new Set(
+      (res.Items ?? [])
+        .map((row) => (row.lobbyId ? String(row.lobbyId) : null))
+        .filter(Boolean)
+    );
+  } catch (err) {
+    console.error("presence scan failed; falling back to age alone", err);
+    return new Set();
+  }
+}
 
 /** identical to listActiveLobbies() in lobbies.mjs — keep the two in sync */
 async function listActiveLobbies() {
+  const live = await lobbiesWithLiveSockets();
   const scan = await ddb.send(
     new ScanCommand({
       TableName: LOBBIES_TABLE,
@@ -131,6 +162,7 @@ async function listActiveLobbies() {
     .map((l) => ({
       phase: "lobby",
       isLive: false,
+      lobbyId: String(l.lobby_id),
       // roster length, not live sockets — see the note in lobbies.mjs
       playerCount: Array.isArray(l.players) ? l.players.length : 0,
       // carried for parity with lobbies.mjs; this route only returns a count,
@@ -140,10 +172,16 @@ async function listActiveLobbies() {
     }))
     .filter((l) => {
       if (l.phase !== "lobby" && l.phase !== "countdown") return false;
-      // a room with a roster never ages out; only EMPTY rooms do
-      if (l.playerCount > 0) return true;
+      /*
+       * PRESENCE, NOT THE ROSTER — the same correction as lobbies.mjs, and it
+       * has to be made here too or the count this route reports goes on
+       * including rooms the browse list has stopped showing. A seat outlives
+       * its socket indefinitely, because a disconnect deliberately is not a
+       * departure; only being CONNECTED says anybody is actually there.
+       */
+      if (live.has(l.lobbyId)) return true;
       const age = Date.now() - new Date(l.createdAt ?? 0).getTime();
-      return age < FRESH_LOBBY_MS;
+      return age < STALE_LOBBY_MS;
     })
     .slice(0, 20);
 }
