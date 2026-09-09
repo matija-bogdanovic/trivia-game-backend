@@ -1,0 +1,724 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+# ===========================================================================
+# template.yaml — the whole of ipakseokrece, as one describable thing
+# ===========================================================================
+#
+# ── WHY THIS EXISTS ────────────────────────────────────────────────────────
+# Everything below was created by hand: nine tables from nine one-off scripts,
+# two roles whose policies were edited in the console, two APIs wired up by
+# clicking, and every deploy a zip built at a terminal. That worked, and it
+# cost real outages. In one working session alone three separate IAM gaps
+# surfaced — Notifications, ChatMessages and PushSubscriptions — each found
+# only when something failed or when somebody thought to look. A CORS origin
+# and a Cognito callback list, both hand-edited, each took the site down the
+# day they were forgotten.
+#
+# The deeper problem is that none of it could be rebuilt. If this AWS account
+# were lost, the repository was a pile of source with no statement anywhere of
+# what it needed to become a running system.
+#
+# This is that statement. Every value in it was read off the live account
+# rather than remembered.
+#
+# ── PLAIN CLOUDFORMATION, NOT SAM OR TERRAFORM ─────────────────────────────
+# Because it deploys with the one tool already installed. SAM needs its own
+# CLI and Terraform needs a state file with somewhere to live; the aws CLI
+# does this today, and CloudFormation keeps the state itself. The template is
+# a little more verbose for it. That is a fair trade for a project whose
+# deploy story has to survive not being touched for six months.
+#
+# ── HOW TO USE IT ──────────────────────────────────────────────────────────
+#   1. Stand up a SECOND environment first (see infra/README.md). Never point
+#      a new stack at production to "see what happens" — see the retention
+#      note below for why that is survivable, and do it anyway.
+#   2. Adopt production with a CloudFormation IMPORT once staging proves the
+#      template is right. The runbook is in infra/README.md.
+#
+# ── EVERY STATEFUL RESOURCE IS RETAINED ────────────────────────────────────
+# Tables and the avatar bucket carry DeletionPolicy AND UpdateReplacePolicy
+# Retain. Deleting this stack, or making a change CloudFormation decides needs
+# a replacement, will orphan them rather than destroy them. That is the single
+# most important line in the file: it means the worst mistake anyone can make
+# here is a mess to clean up, not the loss of every player's account.
+# ===========================================================================
+
+Description: Ipak se okrece - trivia game backend (Lambda, DynamoDB, API Gateway)
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: ipakseokrece
+    Description: Prefix for resources that need a unique name.
+
+  EnvironmentName:
+    Type: String
+    Default: prod
+    AllowedValues: [prod, staging, dev]
+    Description: >-
+      The API Gateway stage, and what separates one deployment from another.
+      Table names are NOT suffixed with it, because production's tables were
+      created unsuffixed and an import has to match what exists. A second
+      environment therefore needs its own TablePrefix.
+
+  TablePrefix:
+    Type: String
+    Default: ""
+    Description: >-
+      Prepended to every table name. Empty for production, which is what its
+      tables are actually called. Set it to something like "staging-" to stand
+      a whole second copy up beside it in the same account.
+
+  AvatarBucketName:
+    Type: String
+    Default: ipak-se-okrece-avatars
+    Description: S3 bucket holding uploaded avatars. Globally unique.
+
+  CognitoUserPoolId:
+    Type: String
+    Default: eu-west-3_Uylh5ZFUK
+
+  CognitoClientId:
+    Type: String
+    Default: 3j69q67dfk60kl92gukqhdlr91
+
+  AllowedOrigin:
+    Type: String
+    Description: >-
+      Comma-separated origins the REST Lambda answers CORS for. Every origin
+      the app is served from must be here AND in the Cognito app client's
+      callback URLs; forgetting either is an outage, and this is half of that
+      pair written down.
+    Default: http://localhost:3000
+
+  VapidPublicKey:
+    Type: String
+    Default: ""
+    Description: VAPID public key for Web Push. Public by design - it ships in the browser bundle.
+
+  VapidPrivateKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >-
+      VAPID private key. NoEcho keeps it out of console output and events, but
+      a CloudFormation parameter is still not a secret store - it is readable
+      by anyone who can read the Lambda's configuration. Moving this to Secrets
+      Manager is the next step; parameterising it is what makes that a one-line
+      change instead of an archaeology exercise.
+
+  VapidSubject:
+    Type: String
+    Default: mailto:matijabog45@icloud.com
+
+  CodeBucket:
+    Type: String
+    Description: S3 bucket holding the two function zips.
+
+  RestCodeKey:
+    Type: String
+    Default: ipakseokrece/rest.zip
+
+  WsCodeKey:
+    Type: String
+    Default: ipakseokrece/ws.zip
+
+Conditions:
+  HasVapid: !Not [!Equals [!Ref VapidPrivateKey, ""]]
+
+Resources:
+  # =========================================================================
+  # STORAGE
+  # =========================================================================
+  #
+  # Nine tables, all PAY_PER_REQUEST. That is not a cost optimisation so much
+  # as an admission: this is a game with bursty, unpredictable traffic and
+  # nobody is going to sit and tune read capacity for it.
+  #
+  # The three TTLs are each a different statement about what the data IS.
+  # Connections expire in two hours because a socket row outlives its socket
+  # only by accident. GameState expires in a day because a match that has not
+  # finished by then never will. Notifications last thirty days because a
+  # notification is worth reading for a while and worthless afterwards.
+  # ChatMessages has no TTL on purpose - it is a collection, not a cache.
+
+  PlayersTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${TablePrefix}Players"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: username, AttributeType: S }
+      KeySchema:
+        - { AttributeName: username, KeyType: HASH }
+
+  LobbiesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${TablePrefix}Lobbies"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: lobby_id, AttributeType: S }
+        - { AttributeName: code, AttributeType: N }
+      KeySchema:
+        - { AttributeName: lobby_id, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        # how a player who types a six-digit code finds the room
+        - IndexName: code-index
+          KeySchema:
+            - { AttributeName: code, KeyType: HASH }
+          Projection: { ProjectionType: ALL }
+
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${TablePrefix}Connections"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: connectionId, AttributeType: S }
+        - { AttributeName: lobbyId, AttributeType: S }
+      KeySchema:
+        - { AttributeName: connectionId, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        # everyone currently in one room, for the fan-out on every broadcast.
+        # GSIs are eventually consistent and cannot be read consistently,
+        # which is why presence.mjs hands a freshly written row to the
+        # broadcaster rather than trusting this index to have caught up.
+        - IndexName: lobby-index
+          KeySchema:
+            - { AttributeName: lobbyId, KeyType: HASH }
+          Projection: { ProjectionType: ALL }
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+
+  GameStateTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${TablePrefix}GameState"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: lobbyId, AttributeType: S }
+      KeySchema:
+        - { AttributeName: lobbyId, KeyType: HASH }
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+
+  QuestionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${TablePrefix}Questions"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: question_id, AttributeType: S }
+      KeySchema:
+        - { AttributeName: question_id, KeyType: HASH }
+
+  MatchesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${TablePrefix}Matches"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: match_id, AttributeType: S }
+      KeySchema:
+        - { AttributeName: match_id, KeyType: HASH }
+
+  ChatMessagesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${TablePrefix}ChatMessages"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: lobbyId, AttributeType: S }
+        - { AttributeName: message_id, AttributeType: S }
+      KeySchema:
+        - { AttributeName: lobbyId, KeyType: HASH }
+        - { AttributeName: message_id, KeyType: RANGE }
+
+  NotificationsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${TablePrefix}Notifications"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: username, AttributeType: S }
+        - { AttributeName: notification_id, AttributeType: S }
+      KeySchema:
+        - { AttributeName: username, KeyType: HASH }
+        # the id begins with the epoch millisecond, so walking this key
+        # backwards IS "newest first" and the bell needs no sort
+        - { AttributeName: notification_id, KeyType: RANGE }
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+
+  PushSubscriptionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${TablePrefix}PushSubscriptions"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: endpoint, AttributeType: S }
+        - { AttributeName: username, AttributeType: S }
+      KeySchema:
+        # keyed by BROWSER, not by person: a phone and a laptop are two rows
+        # and both should buzz
+        - { AttributeName: endpoint, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: username-index
+          KeySchema:
+            - { AttributeName: username, KeyType: HASH }
+          Projection: { ProjectionType: ALL }
+      # deliberately no TTL: a subscription is not a cache. It dies when the
+      # push service answers 404 or 410 and the sender deletes it, which is
+      # the browser actually saying so.
+
+  AvatarBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref AvatarBucketName
+      # served through the avatarServe Lambda, never directly, so the bucket
+      # itself stays closed
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # =========================================================================
+  # PERMISSIONS
+  # =========================================================================
+  #
+  # These are transcribed from the live roles rather than designed here, and
+  # deliberately so: an adoption that also changes behaviour is an adoption
+  # that breaks something and cannot tell you which half did it. Two known
+  # oddities are preserved with a note rather than quietly fixed —
+  # see "TIGHTEN AFTER ADOPTION" below.
+  #
+  # The reason this section is the point of the whole file: three separate
+  # gaps here caused three separate outages, each found by hand. Written down,
+  # a missing grant is a diff.
+
+  RestFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${EnvironmentName}-rest-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: data-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject]
+                Resource: !Sub "arn:aws:s3:::${AvatarBucketName}/avatars/*"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub "arn:aws:s3:::${AvatarBucketName}"
+              - Effect: Allow
+                Action:
+                  [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem,
+                   dynamodb:DeleteItem, dynamodb:Scan]
+                Resource: !GetAtt PlayersTable.Arn
+              - Effect: Allow
+                Action:
+                  [dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem,
+                   dynamodb:Scan]
+                Resource: !GetAtt LobbiesTable.Arn
+              - Effect: Allow
+                Action: dynamodb:Query
+                # NOTE: the live policy also names a Lobbies "admin-index",
+                # which does not exist and never has. Dropped here because a
+                # grant on a phantom resource is not behaviour, it is litter.
+                Resource: !Sub "${LobbiesTable.Arn}/index/code-index"
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !GetAtt MatchesTable.Arn
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:BatchGetItem]
+                Resource: !GetAtt GameStateTable.Arn
+              - Effect: Allow
+                # friendsList reads presence out of the live socket rows. A
+                # Scan because Connections has no username index and holds
+                # tens of items under a 2h TTL, not millions.
+                Action: dynamodb:Scan
+                Resource: !GetAtt ConnectionsTable.Arn
+              - Effect: Allow
+                Action: [dynamodb:Query, dynamodb:UpdateItem]
+                Resource: !GetAtt NotificationsTable.Arn
+              - Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:DeleteItem]
+                Resource: !GetAtt PushSubscriptionsTable.Arn
+
+  WsFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${EnvironmentName}-ws-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: data-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                # posting back down a socket. Scoped to this API only.
+                Action: execute-api:ManageConnections
+                Resource: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/POST/@connections/*"
+              - Effect: Allow
+                Action:
+                  [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem,
+                   dynamodb:DeleteItem]
+                Resource: !GetAtt ConnectionsTable.Arn
+              - Effect: Allow
+                Action: dynamodb:Query
+                Resource: !Sub "${ConnectionsTable.Arn}/index/lobby-index"
+              - Effect: Allow
+                Action:
+                  [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem,
+                   dynamodb:DeleteItem]
+                Resource: !GetAtt GameStateTable.Arn
+              - Effect: Allow
+                Action: dynamodb:Scan
+                Resource: !GetAtt QuestionsTable.Arn
+              - Effect: Allow
+                Action:
+                  [dynamodb:GetItem, dynamodb:UpdateItem, dynamodb:DeleteItem]
+                Resource: !GetAtt LobbiesTable.Arn
+              - Effect: Allow
+                Action: dynamodb:Query
+                Resource: !Sub "${LobbiesTable.Arn}/index/code-index"
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+                Resource: !GetAtt PlayersTable.Arn
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt MatchesTable.Arn
+              - Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:Query]
+                Resource: !GetAtt ChatMessagesTable.Arn
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt NotificationsTable.Arn
+              - Effect: Allow
+                Action: [dynamodb:Query, dynamodb:DeleteItem]
+                Resource:
+                  - !GetAtt PushSubscriptionsTable.Arn
+                  - !Sub "${PushSubscriptionsTable.Arn}/index/username-index"
+              - Effect: Allow
+                # TIGHTEN AFTER ADOPTION: the live policy grants this on "*"
+                # as well as on the state machine. Scoped here to the one
+                # machine that is actually started; if a phase timer ever
+                # stops firing after the import, this line is the first
+                # place to look.
+                Action: [states:StartExecution, states:StopExecution]
+                # Built from the name rather than !Ref, and this is not
+                # cosmetic: the role is needed by the function, the function
+                # by the timer, and the timer by the role. CloudFormation
+                # refuses that cycle. Naming the resources explicitly lets
+                # their ARNs be written down instead of looked up, which cuts
+                # the loop without changing what is granted.
+                Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${ProjectName}-${EnvironmentName}-phase-timer"
+
+  # =========================================================================
+  # THE PHASE CLOCK
+  # =========================================================================
+  #
+  # A Lambda that has returned cannot hold a setTimeout, so every phase
+  # deadline is an ABSOLUTE timestamp in the stored state and this waits on it
+  # from outside. It sleeps until phaseEndsAt, then calls the socket function
+  # back to advance the game.
+
+  PhaseTimerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${EnvironmentName}-phase-timer-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: !Sub "states.${AWS::Region}.amazonaws.com" }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-ws
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                # same cycle, same cure
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-${EnvironmentName}-ws"
+
+  PhaseTimer:
+    Type: AWS::StepFunctions::StateMachine
+    # Stated, because it can no longer be inferred: the definition names the
+    # function by a constructed ARN rather than !GetAtt, so nothing else tells
+    # CloudFormation the function has to exist first.
+    DependsOn: WsFunction
+    Properties:
+      StateMachineName: !Sub "${ProjectName}-${EnvironmentName}-phase-timer"
+      RoleArn: !GetAtt PhaseTimerRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Waits until a phase deadline, then tells the socket function to advance",
+          "StartAt": "WaitForDeadline",
+          "States": {
+            "WaitForDeadline": {
+              "Type": "Wait",
+              "TimestampPath": "$.fireAt",
+              "Next": "AdvancePhase"
+            },
+            "AdvancePhase": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-${EnvironmentName}-ws",
+              "End": true
+            }
+          }
+        }
+
+  # =========================================================================
+  # THE FUNCTIONS
+  # =========================================================================
+  #
+  # Two, and they are genuinely different animals. The REST function fans one
+  # HTTP request out to whichever of its nineteen route files matches; the
+  # socket function runs the game loop and is the only thing that ever writes
+  # GameState. Their memory and timeouts are what production is set to.
+  #
+  # The code comes from S3 rather than being inlined, because inline is capped
+  # at 4KB and these are ~100KB and ~85KB. infra/README.md has the two-line
+  # package step.
+
+  RestFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-${EnvironmentName}-rest"
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt RestFunctionRole.Arn
+      MemorySize: 512
+      # 15s: the slowest thing it does is adopt a Google avatar, which
+      # downloads an image from a third party on a 4s budget of its own
+      Timeout: 15
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref RestCodeKey
+      Environment:
+        Variables:
+          PLAYERS_TABLE: !Ref PlayersTable
+          LOBBIES_TABLE: !Ref LobbiesTable
+          MATCHES_TABLE: !Ref MatchesTable
+          GAME_STATE_TABLE: !Ref GameStateTable
+          CONNECTIONS_TABLE: !Ref ConnectionsTable
+          NOTIFICATIONS_TABLE: !Ref NotificationsTable
+          PUSH_SUBSCRIPTIONS_TABLE: !Ref PushSubscriptionsTable
+          AVATAR_BUCKET: !Ref AvatarBucketName
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          ALLOWED_ORIGIN: !Ref AllowedOrigin
+          VAPID_PUBLIC_KEY: !Ref VapidPublicKey
+          VAPID_PRIVATE_KEY: !If [HasVapid, !Ref VapidPrivateKey, !Ref "AWS::NoValue"]
+          VAPID_SUBJECT: !Ref VapidSubject
+
+  WsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-${EnvironmentName}-ws"
+      Runtime: nodejs24.x
+      Handler: index.handler
+      Role: !GetAtt WsFunctionRole.Arn
+      MemorySize: 256
+      Timeout: 20
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref WsCodeKey
+      Environment:
+        Variables:
+          CONNECTIONS_TABLE: !Ref ConnectionsTable
+          CONNECTIONS_LOBBY_INDEX: lobby-index
+          CONNECTION_TTL_SECONDS: "7200"
+          GAME_STATE_TABLE: !Ref GameStateTable
+          QUESTIONS_TABLE: !Ref QuestionsTable
+          LOBBIES_TABLE: !Ref LobbiesTable
+          PLAYERS_TABLE: !Ref PlayersTable
+          MATCHES_TABLE: !Ref MatchesTable
+          CHAT_MESSAGES_TABLE: !Ref ChatMessagesTable
+          NOTIFICATIONS_TABLE: !Ref NotificationsTable
+          PUSH_SUBSCRIPTIONS_TABLE: !Ref PushSubscriptionsTable
+          PUSH_SUBSCRIPTIONS_INDEX: username-index
+          PHASE_TIMER_ARN: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${ProjectName}-${EnvironmentName}-phase-timer"
+          # a Step Functions invocation has no requestContext to derive this
+          # from, so the timer path needs it stated
+          WS_ENDPOINT: !Sub "https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${EnvironmentName}"
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          VAPID_PUBLIC_KEY: !Ref VapidPublicKey
+          VAPID_PRIVATE_KEY: !If [HasVapid, !Ref VapidPrivateKey, !Ref "AWS::NoValue"]
+          VAPID_SUBJECT: !Ref VapidSubject
+
+  # =========================================================================
+  # THE TWO DOORS
+  # =========================================================================
+  #
+  # A REST API and a WebSocket API, and they must be separate: an API Gateway
+  # REST endpoint cannot serve a socket at all. Pointing the client's socket
+  # URL at the REST host simply fails to connect, which is a mistake worth
+  # naming because the two hostnames look alike.
+
+  # ── REST: everything is ANY /{proxy+} ────────────────────────────────────
+  # One route, one integration, and index.mjs does the dispatching. That is a
+  # deliberate trade: routing in code is a file anyone can read and test,
+  # where nineteen gateway routes are nineteen things to click.
+  RestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${ProjectName}-${EnvironmentName}"
+      EndpointConfiguration: { Types: [REGIONAL] }
+
+  RestProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: "{proxy+}"
+
+  RestProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref RestProxyResource
+      HttpMethod: ANY
+      # NONE, and that is correct: the token is verified INSIDE each handler
+      # against Cognito, so an unauthenticated request reaches the function
+      # and is refused there with a 401. A gateway authorizer would also work;
+      # what must not happen is neither.
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${RestFunction.Arn}/invocations"
+
+  RestDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: RestProxyMethod
+    Properties:
+      RestApiId: !Ref RestApi
+
+  RestStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref RestApi
+      DeploymentId: !Ref RestDeployment
+      StageName: !Ref EnvironmentName
+
+  RestInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt RestFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*/*"
+
+  # ── WebSocket: three routes, one integration ─────────────────────────────
+  # There is no $reconnect route and there is no such thing: a browser that
+  # loses a socket opens a NEW one, which arrives as $connect. Reconnection is
+  # the client's job, and rejoining is what the `join` message does.
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${ProjectName}-${EnvironmentName}-ws"
+      ProtocolType: WEBSOCKET
+      # every message is dispatched on its own `type` field
+      RouteSelectionExpression: "$request.body.type"
+
+  WebSocketIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WsFunction.Arn}/invocations"
+
+  WebSocketConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "$connect"
+      Target: !Sub "integrations/${WebSocketIntegration}"
+
+  WebSocketDisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "$disconnect"
+      Target: !Sub "integrations/${WebSocketIntegration}"
+
+  WebSocketDefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "$default"
+      Target: !Sub "integrations/${WebSocketIntegration}"
+
+  WebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      StageName: !Ref EnvironmentName
+      AutoDeploy: true
+
+  WebSocketInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt WsFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*"
+
+Outputs:
+  RestApiUrl:
+    Description: NEXT_PUBLIC_API_URL for the frontend
+    Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${EnvironmentName}"
+  WebSocketUrl:
+    Description: NEXT_PUBLIC_WS_URL for the frontend
+    Value: !Sub "wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${EnvironmentName}"
+  AvatarBucket:
+    Value: !Ref AvatarBucketName
+  RestFunctionName:
+    Value: !Ref RestFunction
+  WsFunctionName:
+    Value: !Ref WsFunction
