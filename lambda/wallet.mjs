@@ -497,6 +497,22 @@ export const handler = async (event) => {
     return json(event, 200, {
       credits: wallet.credits,
       coins: wallet.coins,
+      /*
+       * Returned as well as accepted.
+       *
+       * This route has always taken a displayName and written it, and never
+       * sent it back — so a client could assert its own name but never read
+       * it. The web app does not notice, because it always has the name to
+       * hand from the id token and simply keeps asserting it. A client
+       * without that claim — anyone signed in with a username and password
+       * rather than through Google — had no way to learn its own name at all,
+       * and fell back to showing the username.
+       *
+       * The row is the authority here, not the token: it is what every other
+       * player sees on a leaderboard, and it survives a rename that no token
+       * knows about yet.
+       */
+      displayName: wallet.displayName ?? null,
       avatar: wallet.avatar,
       ownedAvatars: wallet.ownedAvatars,
       wins: wallet.wins,
