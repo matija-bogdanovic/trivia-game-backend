@@ -335,11 +335,26 @@ function eliminateBrokePlayers(state) {
  */
 function applyDuelAnswer(state, username, answer) {
   const d = state.duel;
-  if (state.phase !== "duel" || !d || d.resolved) return null;
-  if (!Array.isArray(d.players) || !d.players.includes(username)) return null;
+  // each refusal is recorded on the state so the caller can name it; a duel
+  // answer that vanishes is the one thing this phase must never do
+  state.lastAnswerRefusal = null;
+  if (state.phase !== "duel" || !d || d.resolved) {
+    state.lastAnswerRefusal = "not-open";
+    return null;
+  }
+  if (!Array.isArray(d.players) || !d.players.includes(username)) {
+    state.lastAnswerRefusal = "not-racing";
+    return null;
+  }
   d.answers = d.answers ?? {};
-  if (d.answers[username]) return null;
-  if (nowMs() > Number(state.phaseEndsAt ?? 0)) return null;
+  if (d.answers[username]) {
+    state.lastAnswerRefusal = "already";
+    return null;
+  }
+  if (nowMs() > Number(state.phaseEndsAt ?? 0)) {
+    state.lastAnswerRefusal = "too-late";
+    return null;
+  }
 
   const correct = answer === d.question?.answer;
   d.answers[username] = {
@@ -349,8 +364,26 @@ function applyDuelAnswer(state, username, answer) {
   };
   if (correct && !d.firstCorrect) d.firstCorrect = username;
 
+  /*
+   * ── THE RACE RUNS UNTIL BOTH HAVE RACED ───────────────────────────────────
+   *
+   * This used to be `correct || everyoneIn`: the first correct answer ended
+   * the duel on the spot. That reads as reasonable — the fastest correct
+   * answer wins, and once somebody is correct the result is decided — and it
+   * made the duel unplayable for the other person. They tapped an option and
+   * nothing happened, because the phase had already moved on without them.
+   * "Submit ne radi" is what that looks like from the losing side.
+   *
+   * It also threw away the only thing the loser had: their own time. A duel
+   * where you never got to answer tells you nothing about how close it was.
+   *
+   * So the clock now runs until BOTH have answered, or until it runs out.
+   * The winner is unchanged — resolveDuel still takes the fastest correct
+   * answer, and the defender still takes a photo finish — but both racers
+   * get to race, and the reveal can show two times instead of one.
+   */
   const everyoneIn = Object.keys(d.answers).length >= d.players.length;
-  return correct || everyoneIn ? resolveDuel(state) : state;
+  return everyoneIn ? resolveDuel(state) : state;
 }
 
 /**

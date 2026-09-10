@@ -166,18 +166,26 @@ async function onSubmitAnswer(event, connectionId, row, msg) {
     return;
   }
   let phaseMoved = false;
+  /** why an answer bounced, so the client can say something true */
+  let answerRefusal = null;
 
   const res = await mutateGameState(row.lobbyId, (s) => {
     const seqBefore = Number(s.phaseSeq ?? 0);
     let next;
 
+    answerRefusal = null;
     if (s.phase === "duel") {
       next = applyDuelAnswer(s, row.username, answer);
+      // applyDuelAnswer records why it said no, since only it knows
+      if (!next) answerRefusal = s.lastAnswerRefusal ?? "generic";
     } else {
-      if (s.phase !== "question" || !s.turn) return null;
-      if (s.turn.answering !== row.username) return null;
-      if (s.turn.answer !== null && s.turn.answer !== undefined) return null;
-      if (nowMs() > Number(s.phaseEndsAt ?? 0)) return null; // too late — the timer owns it
+      if (s.phase !== "question" || !s.turn) { answerRefusal = "not-open"; return null; }
+      if (s.turn.answering !== row.username) { answerRefusal = "not-your-turn"; return null; }
+      if (s.turn.answer !== null && s.turn.answer !== undefined) {
+        answerRefusal = "already"; return null;
+      }
+      // too late — the timer owns it from here
+      if (nowMs() > Number(s.phaseEndsAt ?? 0)) { answerRefusal = "too-late"; return null; }
       s.turn.answer = answer;
       s.turn.answeredInMs = nowMs() - Number(s.turn.askedAt ?? nowMs());
       // the answer stays hidden while the last bets come in — room.ts's "last
@@ -191,7 +199,22 @@ async function onSubmitAnswer(event, connectionId, row, msg) {
     return next;
   });
 
-  if (!res.ok) return; // not their turn, already answered, or past the buzzer
+  /*
+   * A REFUSED ANSWER IS NOT SILENT ANY MORE.
+   *
+   * This was `if (!res.ok) return;`, and it is the same defect the betting
+   * path had: the button appears dead. Tapping an option and watching nothing
+   * happen is indistinguishable from a broken app, and in a duel — where the
+   * whole game is how fast you press — it is the worst possible thing to
+   * leave unexplained.
+   */
+  if (!res.ok) {
+    await postTo(event, connectionId, {
+      type: "answer_denied",
+      reason: answerRefusal ?? "generic",
+    });
+    return;
+  }
   await broadcastPhase(event, row.lobbyId, res.state);
   // a duel that is still running kept its deadline, and re-arming a timer that
   // is already asleep on the right instant would only churn executions
