@@ -17,6 +17,7 @@ import {
   ROUND_INTRO_MS,
   SPIN_TIME_MS,
   WRONG_ANSWER_COST,
+  correctAnswerReward,
   nowMs,
   questionTimeFor,
 } from "./config.mjs";
@@ -501,6 +502,7 @@ function enterReveal(state) {
     player.stats = player.stats ?? { correct: 0, wrong: 0, betsWon: 0, maxBetWin: 0, roundsPlayed: 0 };
     if (correct) {
       player.stats.correct = Number(player.stats.correct ?? 0) + 1;
+      // paid below, AFTER the bets — see the note there
     } else {
       player.stats.wrong = Number(player.stats.wrong ?? 0) + 1;
       const penalty = Math.min(WRONG_ANSWER_COST, player.money);
@@ -516,6 +518,33 @@ function enterReveal(state) {
   // pay the bets before checking for broke players, so a winner whose payout
   // rescues them from zero is not eliminated a moment before being paid
   settleBets(state);
+
+  /*
+   * ── AND THEN THE ANSWERER, OUT OF WHAT IS LEFT ────────────────────────────
+   *
+   * AFTER the bets, and that order is the point. A quota is a promise: a
+   * winning stake is paid its full price even when the pot has to go into
+   * deficit to do it. A reward is not a promise — it is a share of what other
+   * people have lost — so it takes what remains and never more.
+   *
+   * `Math.max(0, pot)` is what makes this rule incapable of minting. A pot
+   * already in deficit from a bet payout holds nothing to give, so the answer
+   * is worth zero, and the ledger identity is untouched either way: this is a
+   * transfer out of the pot, not an invention.
+   *
+   * Zero is a real and frequent outcome early in a match, when nobody has lost
+   * anything yet. That is the rule being honest about the state of the world
+   * rather than stingy.
+   */
+  if (correct && player) {
+    const available = Math.max(0, Number(state.pot ?? 0));
+    const reward = Math.min(correctAnswerReward(state.chainDepth), available);
+    if (reward > 0) {
+      player.money = Number(player.money ?? 0) + reward;
+      state.pot = Number(state.pot ?? 0) - reward;
+      t.answererDelta = reward;
+    }
+  }
 
   // elimination wiring — P2.4 finalises standings and persistence
   eliminateBrokePlayers(state);

@@ -259,6 +259,44 @@ const DECK_SLICE_SIZE = 150;
 const DECK_USED_LIMIT = 400;
 /** what a wrong answer or a timeout costs the answerer */
 const WRONG_ANSWER_COST = 100;
+
+/* ── WHAT A CORRECT ANSWER IS WORTH ────────────────────────────────────────
+ * For a long time: nothing. A wrong answer cost a hundred and a right one
+ * earned zero, so the person on the spot could only lose, and the only prize
+ * for knowing something was the right to pick who suffers next. Players read
+ * that as the game being unclear about winning, and they were right.
+ *
+ * ── WHERE THE MONEY COMES FROM, WHICH IS THE WHOLE DESIGN ─────────────────
+ * The POT, and nowhere else. The pot is filled exclusively by other people's
+ * losses — wrong answers, losing stakes, forfeited duel antes — so paying a
+ * correct answer out of it invents nothing:
+ *
+ *     you win what the others have already lost
+ *
+ * `sum(players.money) + pot` stays invariant and this rule can never mint,
+ * because it is capped by what the pot actually holds. Minting from a reward
+ * would inflate the economy until nobody reaches zero and the match cannot
+ * end — elimination is the game.
+ *
+ * An empty pot therefore pays nothing, and that is honest rather than mean:
+ * nobody has lost anything yet, so there is nothing to win. Early rounds are
+ * quiet by construction, which is also when the least is at risk.
+ */
+const CORRECT_ANSWER_REWARD = 100;
+
+/**
+ * Added per link of the chain, because the chain already raises the
+ * DIFFICULTY — the tier climbs every two links and the clock shrinks with it.
+ * A reward that ignored depth would pay the same for the easiest question in
+ * the match and the hardest.
+ */
+const CORRECT_ANSWER_CHAIN_BONUS = 25;
+
+/** what this turn's correct answer is worth before the pot is consulted */
+function correctAnswerReward(chainDepth) {
+  const depth = Math.max(0, Math.floor(Number(chainDepth) || 0));
+  return CORRECT_ANSWER_REWARD + CORRECT_ANSWER_CHAIN_BONUS * depth;
+}
 /** smallest stake, and the floor for being counted as an eligible bettor */
 const MIN_BET = 10;
 
@@ -397,6 +435,9 @@ export {
   POINTS_PER_WIN,
   POINTS_STREAK_BONUS,
   POINTS_STREAK_BONUS_CAP,
+  CORRECT_ANSWER_REWARD,
+  CORRECT_ANSWER_CHAIN_BONUS,
+  correctAnswerReward,
   WRONG_ANSWER_COST,
   WS_ENDPOINT,
   capacityOf,
